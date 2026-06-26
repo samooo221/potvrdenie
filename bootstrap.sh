@@ -110,10 +110,12 @@ fi
 # dev box. Two ways to get a llama-server here:
 #   FAST  : a prebuilt release binary (no compiler needed)  -> set PHASE6_PREBUILT=1
 #   FULL  : the Vulkan build in section 3 (for the rack's RX 580s)
-# Set PHASE6_MODEL_URL to a tiny instruct GGUF (≈1GB Q4). Default below is a small
-# multilingual model adequate for short Slovak name/word cleanup.
+# Default model is Gemma-3-4B-it (≈2.5GB Q4) — markedly better Slovak suggestions
+# than a 1–2B model, still small enough for CPU. For a lighter footprint swap in a
+# tiny model, e.g. Qwen2.5-1.5B-Instruct-Q4_K_M (≈1GB). serve_llm.sh auto-serves
+# the LARGEST .gguf in ~/models, so keep only the one you want as default.
 PHASE6_PREBUILT="${PHASE6_PREBUILT:-0}"
-PHASE6_MODEL_URL="${PHASE6_MODEL_URL:-https://huggingface.co/bartowski/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf}"
+PHASE6_MODEL_URL="${PHASE6_MODEL_URL:-https://huggingface.co/ggml-org/gemma-3-4b-it-GGUF/resolve/main/gemma-3-4b-it-Q4_K_M.gguf}"
 
 if [ "$PHASE6_PREBUILT" = "1" ]; then
   say "Phase-6: fetching a prebuilt llama.cpp binary (no compile)"

@@ -19,10 +19,11 @@ set -uo pipefail
 PORT="${PORT:-8080}"
 NGL="${NGL:-0}"
 
-# Locate the model: explicit LLM_MODEL, else the first gguf in ~/models.
+# Locate the model: explicit LLM_MODEL, else the LARGEST gguf in ~/models
+# (bigger ≈ better suggestions — picks Gemma-3-4B over a tiny model automatically).
 MODEL="${LLM_MODEL:-}"
 if [ -z "$MODEL" ]; then
-  MODEL="$(ls "$HOME"/models/*.gguf 2>/dev/null | head -1)"
+  MODEL="$(ls -S "$HOME"/models/*.gguf 2>/dev/null | head -1)"
 fi
 
 # Locate llama-server: a Vulkan/CUDA build, else a downloaded prebuilt copy.

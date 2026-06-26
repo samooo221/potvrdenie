@@ -33,12 +33,13 @@ import urllib.request
 
 LLAMA_URL = os.environ.get("LLAMA_URL", "http://localhost:8080").rstrip("/")
 
-# GBNF: 1–4 words of Slovak UPPERCASE block letters (paličkové písmo), single
-# spaces. Constrains the model to a plausible name/address shape — no digits,
-# punctuation, or lowercase. Bounded to 4 words so a weak model can't loop into a
-# repeated-garbage string ("ŤURAVA BLOK ŤURAVA BLOK …").
+# GBNF: 1–2 words of Slovak UPPERCASE block letters (paličkové písmo), single
+# space. Constrains the model to a plausible name/street shape — no digits,
+# punctuation, or lowercase. Bounded to 2 words: the form fields here are a
+# surname+given or a 1–2 word street, and a tight bound stops a model from
+# rambling into a multi-word hallucination ("TOTH KOSTOLAN TAINKO ĎURČAŠÍN").
 _SLOVAK_GBNF = (
-    'root ::= word (" " word)? (" " word)? (" " word)?\n'
+    'root ::= word (" " word)?\n'
     "word ::= letter letter? letter? letter? letter? letter? letter? letter? "
     "letter? letter? letter? letter? letter? letter? letter?\n"
     'letter ::= [A-Z] | "Á" | "Ä" | "Č" | "Ď" | "É" | "Í" | "Ĺ" | "Ľ" | "Ň" '
@@ -81,28 +82,27 @@ def _prompt(field: str, ocr_string: str, is_name: bool) -> str:
             f"block letters, no quotes, no extra words.")
 
 
-def _llm_clean(field: str, ocr_string: str, is_name: bool, timeout: float = 8.0):
-    """POST a grammar-constrained completion to the local server. Returns the
-    cleaned string, or None on unavailability / any error (→ graceful degrade)."""
+def _llm_clean(field: str, ocr_string: str, is_name: bool, timeout: float = 20.0):
+    """Ask the local server for a cleaned string. Uses the OpenAI-style
+    /v1/chat/completions endpoint so the loaded model's OWN chat template is applied
+    automatically (instruct models like Gemma underperform on a raw /completion
+    prompt) — keeps this model-agnostic. Grammar-constrained to Slovak block letters.
+    Returns the string, or None on unavailability / any error (→ graceful degrade)."""
     if not llm_available():
         return None
     body = json.dumps({
-        "prompt": _prompt(field, ocr_string, is_name),
-        "temperature": 0.1,          # deterministic structuring, per pipeline rule
+        "messages": [{"role": "user", "content": _prompt(field, ocr_string, is_name)}],
+        "temperature": 0.0,          # greedy = the single most likely correction
         "n_predict": 16,
-        "grammar": _SLOVAK_GBNF,
-        "repeat_penalty": 1.3,       # discourage a weak model from looping
-        "repeat_last_n": 64,
-        "stop": ["\n", '"'],
-        "cache_prompt": True,
+        "grammar": _SLOVAK_GBNF,     # llama.cpp honours grammar on the chat endpoint
     }).encode("utf-8")
     try:
         req = urllib.request.Request(
-            LLAMA_URL + "/completion", data=body,
+            LLAMA_URL + "/v1/chat/completions", data=body,
             headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=timeout) as r:
             data = json.loads(r.read().decode("utf-8"))
-        text = (data.get("content") or "").strip()
+        text = (data["choices"][0]["message"]["content"] or "").strip()
         return text or None
     except Exception:
         return None
@@ -129,8 +129,18 @@ def _revalidate(field: str, value: str, ocr: str) -> bool:
         return False
     if len(v) > max(len(ocr) + 4, int(len(ocr) * 1.6)):      # repetition / runaway
         return False
-    similarity = difflib.SequenceMatcher(None, _norm(v), _norm(ocr)).ratio()
-    return similarity >= 0.5                                   # resembles the OCR
+    return _similarity(v, ocr) >= 0.5                          # resembles the OCR
+
+
+def _similarity(a: str, b: str) -> float:
+    """Diacritic-insensitive 0–1 similarity between two strings."""
+    return difflib.SequenceMatcher(None, _norm(a), _norm(b)).ratio()
+
+
+# A name SUGGESTION is only worth showing if it plausibly relates to the OCR.
+# Looser than the adoption threshold (the OCR is noisier on hard names), but it
+# suppresses wild hallucinations ("NOVAK PETF" → "HORVÁTH SLOVÁK ĎURČAN").
+_NAME_SUGGEST_MIN = 0.4
 
 
 def text_second_check(field: str, ocr_string: str, is_name: bool) -> dict:
@@ -154,7 +164,11 @@ def text_second_check(field: str, ocr_string: str, is_name: bool) -> dict:
         return {"value": raw, "suggestion": None, "source": "ocr"}
 
     if is_name:
-        # Suggestion only — NEVER replace a real value with the model's guess.
+        # Suggestion only — NEVER replace a real value with the model's guess. And
+        # only surface it if it plausibly relates to the OCR, so a hallucinated
+        # unrelated name isn't shown to the reviewer.
+        if _similarity(cleaned, raw) < _NAME_SUGGEST_MIN:
+            return {"value": raw, "suggestion": None, "source": "ocr"}
         return {"value": raw, "suggestion": cleaned, "source": "llm-suggestion"}
 
     # Semi-open: adopt the cleaned string iff it re-validates against the OCR.

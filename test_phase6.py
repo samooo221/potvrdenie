@@ -12,10 +12,11 @@ import text_second_check as t
 
 CASES = [
     # (field, noisy OCR, is_name, what we're checking)
-    ("meno_zamestnanca", "NOVAK PETF",  True,  "name → SUGGESTION only (value never replaced)"),
-    ("meno_zamestnanca", "KRAJCI ANNB", True,  "name → SUGGESTION only"),
-    ("ulica",            "STUROVB",     False, "semi-open → CLEAN + adopt iff re-validated"),
-    ("zam_obchodne_meno","TESCO STOREZ",False, "semi-open company → CLEAN + adopt"),
+    ("ulica",            "HVIEZDOSLAVOVB", False, "semi-open → CLEAN + adopt (resembles OCR)"),
+    ("ulica",            "PODHRADIB",      False, "semi-open → CLEAN + adopt"),
+    ("zam_obchodne_meno","TESCO STOREZ",   False, "semi-open → kept if cleanup doesn't resemble (safety)"),
+    ("meno_zamestnanca", "TOTH KATARIMA",  True,  "name → SUGGESTION only (value never replaced)"),
+    ("meno_zamestnanca", "NOVAK PETF",     True,  "name → wild guess FILTERED out (safety)"),
 ]
 
 
