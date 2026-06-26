@@ -32,14 +32,20 @@ recognition errors. In `process_live` (real photos) no validation runs at all.
 This inversion is why the broken-sample test, while passing, isn't testing the
 thing that matters.
 
-### Plus: bless the divergence
+### Plus: bless the divergence (with one scoped LLM exception)
 Dropping the LLM structuring lane was the RIGHT call, not a regression. For a
 fixed comb-boxed form, deterministic structuring is more correct and more
 auditable than an LLM. Do NOT add `extract_potvrdenie.py` / GBNF back as a
-required stage. Keep an LLM only as an OPTIONAL future robustness layer for
-genuinely messy/variable inputs, if real data ever demands it. Update CLAUDE.md's
-target architecture to match: AI lives in perception; structuring + maths are
-deterministic.
+*required structuring stage*, and the LLM NEVER touches numbers (amounts, RČ,
+DIČ, dates) — those stay deterministic, with arithmetic/mod-11 as the check.
+
+The one place an LLM now earns a defined role is a **text-field second-check
+tier** (Phase 6): an escalation-only fallback for the noisy free-text fields,
+where there is a language prior to exploit. It is gated behind confidence
+(Phase 1) and escalation (Phase 2), always re-validated, suggestion-only on
+names, and runs on a small LOCAL model. Update CLAUDE.md's target to: AI lives
+in perception; structuring + all maths are deterministic; one local, scoped LLM
+tier rescues escalated text fields only.
 
 ## The reframe on the 99%
 It's against a printed font the code drew itself, graded on shared coordinates.
@@ -94,8 +100,43 @@ current accuracy figure as "plumbing OK," full stop.
   for the open-vocabulary fields; titul → recognizer + snap-to-known-title-list.
 - Do NOT build speculatively. The Phase-4 numbers choose the tool per field.
 
+### Phase 6 — Text-field second-check tier (the scoped LLM in robustness)
+Applies ONLY to free-text fields, and ONLY on escalation (low confidence from
+Phase 1, or a failed gazetteer match). Never to numeric fields — a digit misread
+loses the information at perception, so the LLM has nothing to reason from, and
+those fields are already covered deterministically. The field tiers:
+
+- **Closed/known sets → gazetteer first, no LLM needed.** štát (tiny list),
+  titul (Ing./Mgr./PhD./… finite), obec (Slovak municipality register, ~2,900
+  names). Fuzzy-match the noisy OCR against the real list — deterministic,
+  auditable, cannot invent a town. This tier alone is a big robustness win and
+  can land alongside Phase 2 (it needs no model).
+- **Semi-open → gazetteer, then LLM fallback on miss.** ulica, obchodné meno.
+  Registers exist but are large/variable; when the fuzzy match fails, the LLM
+  cleans the OCR string.
+- **Open-vocabulary → LLM SUGGESTION ONLY, never auto-accept.** personal names
+  (meno, priezvisko, child names, vypracoval). The name prior helps
+  ("Nowák"→"Novák", stitching a split surname), but "correcting" a rare-but-real
+  surname into a common one is a worse, invisible error than a flag. Output is
+  shown to the human beside the scan as a suggestion; it is never committed.
+
+Rails (non-negotiable):
+- Fires only on escalated TEXT fields. Numbers never enter this tier.
+- For closed-set fields, constrain LLM output to the known list; for open fields,
+  grammar-constrain to a plausible string (GBNF / json_schema).
+- Output is RE-VALIDATED (empty name, town not in register → flag, not accept).
+- Names are suggestion-only.
+
+Dependency: this lights up the local llama-server lane you deferred — but scoped
+to short text-string cleanup, so the model is tiny (1–4B, one RX 580 via Vulkan,
+or the laptop) and far lighter than the dropped structuring-LLM idea. It MUST be
+local (taxpayer names/addresses — same sovereignty constraint as everything
+else). Build it to degrade gracefully: if llama-server is down, fall back to
+gazetteer-plus-flag and the pipeline keeps running.
+
 ## Explicitly DEFER (not now)
-- LLM structuring lane / GBNF / `extract_potvrdenie.py` — deterministic wins.
+- LLM structuring lane / GBNF as a *required* stage — deterministic wins. (The
+  only LLM in scope is the Phase-6 text second-check above.)
 - Two-GPU Vulkan rack + GPU PaddleOCR — a deployment optimization, not a
   capability gap. Irrelevant to whether it reads real forms. Defer until the
   recognition is proven.
@@ -119,3 +160,11 @@ current accuracy figure as "plumbing OK," full stop.
     handwritten samples through align + ocr_page, compares to my typed labels,
     and reports per-field accuracy AND mean confidence, so I can see which
     fields actually need ICR."
+5. (Phase 6) "Add a text_second_check(field, ocr_string, confidence) for the
+    FUZZY_TEXT_FIELDS only, hooked into the FUZZY_TEXT branch of ocr_page so it
+    fires only when confidence is low. Tier it: gazetteer fuzzy-match first for
+    stat/titul/obec (build the lists), LLM fallback (local llama-server, tiny
+    model, grammar-constrained) for ulica/obchodne_meno, and for personal names
+    return the LLM output as a human-facing SUGGESTION only — never auto-accept.
+    Re-validate every result and flag on failure. Never route numeric fields
+    here. Degrade to gazetteer-plus-flag if llama-server is unavailable."
