@@ -25,18 +25,22 @@ Config via env: LLAMA_URL (default http://localhost:8080).
 """
 from __future__ import annotations
 
+import difflib
 import json
 import os
+import unicodedata
 import urllib.request
 
 LLAMA_URL = os.environ.get("LLAMA_URL", "http://localhost:8080").rstrip("/")
 
-# GBNF: 1+ words of Slovak UPPERCASE block letters (paličkové písmo) separated by
-# single spaces. Constrains the model to a plausible name/word shape — it cannot
-# emit digits, punctuation, or lowercase noise.
+# GBNF: 1–4 words of Slovak UPPERCASE block letters (paličkové písmo), single
+# spaces. Constrains the model to a plausible name/address shape — no digits,
+# punctuation, or lowercase. Bounded to 4 words so a weak model can't loop into a
+# repeated-garbage string ("ŤURAVA BLOK ŤURAVA BLOK …").
 _SLOVAK_GBNF = (
-    'root ::= word (" " word)*\n'
-    "word ::= letter+\n"
+    'root ::= word (" " word)? (" " word)? (" " word)?\n'
+    "word ::= letter letter? letter? letter? letter? letter? letter? letter? "
+    "letter? letter? letter? letter? letter? letter? letter?\n"
     'letter ::= [A-Z] | "Á" | "Ä" | "Č" | "Ď" | "É" | "Í" | "Ĺ" | "Ľ" | "Ň" '
     '| "Ó" | "Ô" | "Ŕ" | "Š" | "Ť" | "Ú" | "Ý" | "Ž"\n'
 )
@@ -85,8 +89,10 @@ def _llm_clean(field: str, ocr_string: str, is_name: bool, timeout: float = 8.0)
     body = json.dumps({
         "prompt": _prompt(field, ocr_string, is_name),
         "temperature": 0.1,          # deterministic structuring, per pipeline rule
-        "n_predict": 24,
+        "n_predict": 16,
         "grammar": _SLOVAK_GBNF,
+        "repeat_penalty": 1.3,       # discourage a weak model from looping
+        "repeat_last_n": 64,
         "stop": ["\n", '"'],
         "cache_prompt": True,
     }).encode("utf-8")
@@ -102,13 +108,29 @@ def _llm_clean(field: str, ocr_string: str, is_name: bool, timeout: float = 8.0)
         return None
 
 
-def _revalidate(field: str, value: str) -> bool:
-    """Deterministic re-validation of an LLM-adopted value (semi-open tier): the
-    model never gets the last word. Non-empty, only Slovak block letters + spaces."""
+def _norm(s: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFD", s.upper())
+                   if unicodedata.category(c) != "Mn" and c.isalnum())
+
+
+def _revalidate(field: str, value: str, ocr: str) -> bool:
+    """Deterministic re-validation of an LLM-adopted value (semi-open tier) — the
+    model never gets the last word. The adopted string must be:
+      1. non-empty, only Slovak block letters + spaces;
+      2. not wildly longer than the OCR (catches repetition loops);
+      3. an actual CLEANUP of the OCR, not an invention — it has to resemble the
+         input (diacritic-insensitive similarity above a floor). A model that
+         hallucinates an unrelated string fails here and the OCR value is kept+flagged.
+    """
     from field_defs import SLOVAK_ALPHA
     allowed = set(SLOVAK_ALPHA) | {" "}
     v = value.strip()
-    return bool(v) and all(c in allowed for c in v)
+    if not v or not all(c in allowed for c in v):
+        return False
+    if len(v) > max(len(ocr) + 4, int(len(ocr) * 1.6)):      # repetition / runaway
+        return False
+    similarity = difflib.SequenceMatcher(None, _norm(v), _norm(ocr)).ratio()
+    return similarity >= 0.5                                   # resembles the OCR
 
 
 def text_second_check(field: str, ocr_string: str, is_name: bool) -> dict:
@@ -135,8 +157,8 @@ def text_second_check(field: str, ocr_string: str, is_name: bool) -> dict:
         # Suggestion only — NEVER replace a real value with the model's guess.
         return {"value": raw, "suggestion": cleaned, "source": "llm-suggestion"}
 
-    # Semi-open: adopt the cleaned string iff it re-validates.
-    if _revalidate(field, cleaned):
+    # Semi-open: adopt the cleaned string iff it re-validates against the OCR.
+    if _revalidate(field, cleaned, raw):
         return {"value": cleaned, "suggestion": None, "source": "llm-clean"}
     return {"value": raw, "suggestion": None, "source": "ocr"}
 

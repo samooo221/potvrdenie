@@ -104,6 +104,45 @@ else
   warn "MODEL_URL empty — copy your Gemma-3-4B QAT .gguf into ${MODEL_DIR} (or scp it from the rack)."
 fi
 
+# --- 4b. PHASE-6 LLM tier (text second-check) ------------------------------
+# The ONLY LLM in the pipeline (structuring is deterministic). It cleans/suggests
+# for escalated TEXT fields only and needs just a TINY model — CPU is fine for the
+# dev box. Two ways to get a llama-server here:
+#   FAST  : a prebuilt release binary (no compiler needed)  -> set PHASE6_PREBUILT=1
+#   FULL  : the Vulkan build in section 3 (for the rack's RX 580s)
+# Set PHASE6_MODEL_URL to a tiny instruct GGUF (≈1GB Q4). Default below is a small
+# multilingual model adequate for short Slovak name/word cleanup.
+PHASE6_PREBUILT="${PHASE6_PREBUILT:-0}"
+PHASE6_MODEL_URL="${PHASE6_MODEL_URL:-https://huggingface.co/bartowski/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf}"
+
+if [ "$PHASE6_PREBUILT" = "1" ]; then
+  say "Phase-6: fetching a prebuilt llama.cpp binary (no compile)"
+  PB_DIR="${HOME}/llama_prebuilt"; mkdir -p "$PB_DIR"
+  if ! ls "$PB_DIR"/*/llama-server >/dev/null 2>&1; then
+    PB_URL="$(curl -s https://api.github.com/repos/ggml-org/llama.cpp/releases/latest \
+      | grep -oE '"browser_download_url": *"[^"]*bin-ubuntu-x64[^"]*"' | grep -oE 'https[^"]*' | head -1)"
+    if [ -n "$PB_URL" ]; then
+      curl -L "$PB_URL" -o "${PB_DIR}/llama.tgz" && tar xzf "${PB_DIR}/llama.tgz" -C "$PB_DIR" \
+        && ok "prebuilt llama-server in ${PB_DIR}" \
+        || warn "prebuilt fetch/extract failed — fall back to the Vulkan build (section 3)."
+    else
+      warn "could not resolve a prebuilt asset URL — use the Vulkan build instead."
+    fi
+  else ok "prebuilt llama-server already present"; fi
+fi
+
+if [ -n "$PHASE6_MODEL_URL" ]; then
+  say "Phase-6: downloading the tiny text-cleanup model"
+  P6_OUT="${MODEL_DIR}/$(basename "$PHASE6_MODEL_URL")"
+  if [ ! -f "$P6_OUT" ]; then
+    curl -L "$PHASE6_MODEL_URL" -o "$P6_OUT" && ok "phase-6 model: $P6_OUT" \
+      || warn "phase-6 model download failed (needs network)."
+  else ok "phase-6 model already present: $P6_OUT"; fi
+  echo ">>> Start the Phase-6 server (CPU):   bash ${PROJ}/serve_llm.sh"
+  echo ">>> ...or GPU-offloaded:              NGL=99 bash ${PROJ}/serve_llm.sh"
+  echo ">>> Smoke-test once it's up:          python ${PROJ}/test_phase6.py"
+fi
+
 # --- 5. DEVICE MAP — the whole point on a mixed box ------------------------
 # Confirms the lanes are separate BEFORE you trust any hardcoded GPU indices.
 say "DEVICE MAP"
