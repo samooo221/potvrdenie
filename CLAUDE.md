@@ -84,7 +84,6 @@ non-erroring shift, not a crash.)
 - llama.cpp: `~/llama.cpp/build/bin/`. Models: `~/models/`.
 - llama-server runs on port 8080; the structuring code just POSTs to
   `http://localhost:8080/completion` and is indifferent to which GPU serves it.
-- `files/` at the repo root contains copies of `CLAUDE.md` and `bootstrap.sh` — purpose TBD, not source code.
 - Hardest recognition target: Slovak diacritics in free-text name/address fields
   (á č ď é í ľ ň ô š ť ž). Numbers are the easy, high-value part — prioritise them.
 
