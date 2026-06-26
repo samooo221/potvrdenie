@@ -627,16 +627,19 @@ def _filter_slovak_text(s: str) -> str:
     return " ".join(out.split())
 
 
-def _ocr_comb_text(img: Image.Image, cells, inner: float = 0.62) -> tuple[str, float]:
-    """Read a free-text comb field by reconstructing the word. Returns (text, score).
+# Centre-crop widths tried when reconstructing a comb word. A fixed narrow crop
+# slices the sides off some block-capital glyphs ("ĎURICA"→"JRISA", "TOMÁŠ"→"MAS");
+# a wider crop recovers them but can pull in a neighbour's ink on others. So we read
+# at several widths and keep the highest-confidence result. The narrow 0.62 stays a
+# candidate, so this can only raise (never lower) the best achievable score.
+_COMB_INNER_WIDTHS = (0.62, 0.72, 0.82)
 
-    Comb fields put one letter per box with vertical tick dividers between them.
-    Whole-box OCR reads those dividers and gaps as junk ("Slovenská" →
-    "Astlolylelnlslkial"). Instead, crop the centre `inner` fraction of each
-    inked cell (excluding the divider edges) and paste the tiles GAPLESSLY into
-    one strip, reconstructing a natural word the Latin model can read with its
-    Slovak diacritics intact ("Krátka" → "Krátka").
-    """
+
+def _assemble_comb_strip(img: Image.Image, cells, inner: float):
+    """Crop the centre `inner` fraction of each inked cell and paste the tiles
+    GAPLESSLY into one strip — the reconstruction that lets the Latin model read a
+    comb word ("Krátka") instead of the dividers as junk ("Astlolylelnlslkial").
+    Returns the strip, or None if no cell is inked (an empty field)."""
     tiles = []
     for c in cells:
         if _cell_ink(img, c) <= 0.02:
@@ -645,7 +648,7 @@ def _ocr_comb_text(img: Image.Image, cells, inner: float = 0.62) -> tuple[str, f
         m = int((x2 - x1) * (1 - inner) / 2)
         tiles.append(img.crop((x1 + m, y1, x2 - m, y2)))
     if not tiles:
-        return "", 1.0          # empty (unfilled) field — not low-confidence
+        return None
     h = max(t.height for t in tiles)
     w = sum(t.width for t in tiles)
     strip = Image.new("L", (w + 8, h + 8), 255)
@@ -653,8 +656,35 @@ def _ocr_comb_text(img: Image.Image, cells, inner: float = 0.62) -> tuple[str, f
     for t in tiles:
         strip.paste(t, (x, 4))
         x += t.width
-    text, score = ocr_text_crop(strip)
-    return _filter_slovak_text(text), score
+    return strip
+
+
+def _ocr_comb_text(img: Image.Image, cells, inner: float = 0.62,
+                   multiwidth: bool = False) -> tuple[str, float]:
+    """Read a free-text comb field by reconstructing the word. Returns (text, score);
+    empty (unfilled) field → ("", 1.0).
+
+    Comb fields put one letter per box with vertical tick dividers. Whole-box OCR
+    reads those as junk, so we paste the inked-cell centres GAPLESSLY into a word the
+    Latin model can read with diacritics intact ("Krátka").
+
+    multiwidth=True reads at several centre-crop widths (_COMB_INNER_WIDTHS) and keeps
+    the highest-confidence result. A fixed narrow crop slices the sides off some block
+    capitals (ĎURICA→JRISA, conf 0.55); a wider crop recovers them. This is used ONLY
+    for the short NAME combs, where it's verified to fix the bad cases with zero
+    regression. It is NOT used for long fields (e.g. ulica, 27 cells), where a wide
+    crop can pull in a neighbour's ink and a wrong-but-confident read would win.
+    """
+    widths = _COMB_INNER_WIDTHS if multiwidth else (inner,)
+    best_text, best_score = "", -1.0
+    for frac in widths:
+        strip = _assemble_comb_strip(img, cells, frac)
+        if strip is None:
+            return "", 1.0      # empty (unfilled) field — not low-confidence
+        text, score = ocr_text_crop(strip)
+        if score > best_score:
+            best_text, best_score = _filter_slovak_text(text), score
+    return best_text, best_score
 
 
 def _ocr_text_field(img: Image.Image, field: str) -> dict:
@@ -664,9 +694,13 @@ def _ocr_text_field(img: Image.Image, field: str) -> dict:
 
 
 def _ocr_meno_field(img: Image.Image) -> dict:
-    """Surname (Priezvisko comb) + given name (Meno comb), reconstructed words."""
-    sur, s_sur = _ocr_comb_text(img, PRIEZVISKO_CELLS)
-    giv, s_giv = _ocr_comb_text(img, MENO_CELLS)
+    """Surname (Priezvisko comb) + given name (Meno comb), reconstructed words.
+
+    Uses multi-width reconstruction: the name combs are short, and a single fixed
+    crop misreads some block-capital glyphs (ĎURICA→JRISA). Verified to fix the bad
+    cases with zero regression across the sample set."""
+    sur, s_sur = _ocr_comb_text(img, PRIEZVISKO_CELLS, multiwidth=True)
+    giv, s_giv = _ocr_comb_text(img, MENO_CELLS, multiwidth=True)
     return _text_result(f"{sur} {giv}".strip(), min(s_sur, s_giv))
 
 
