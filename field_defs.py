@@ -345,6 +345,18 @@ CHECKBOX_FIELDS   = set(CHECKBOX_BOXES.keys())       # oprava/danovnik_obmedzena
 # open-vocabulary and stay confidence-flag-only.
 GAZETTEER_FIELDS  = {"titul", "obec", "stat", "zam_titul", "zam_obec", "zam_stat"}
 
+# Phase-6 text second-check tiers (the scoped LLM in robustness). Both fire ONLY
+# on escalated (low-confidence) text fields, never on numbers.
+# - SEMI_OPEN: a register exists but is large/variable (no gazetteer). On low
+#   confidence the local LLM CLEANS the OCR string; the cleaned value is adopted
+#   only if it re-validates. Auditable, auto-acceptable.
+# - NAME: open-vocabulary personal/company-person names. The LLM output is a
+#   human-facing SUGGESTION only — never auto-accepted (a "corrected" rare-but-real
+#   surname is a worse, invisible error than a flag).
+SEMI_OPEN_FIELDS  = {"ulica", "zam_ulica", "zam_obchodne_meno"}
+NAME_FIELDS       = {"meno_zamestnanca", "zam_priezvisko", "zam_meno", "vypracoval",
+                     "dieta1_meno", "dieta2_meno", "dieta3_meno", "dieta4_meno"}
+
 # Slovak alphabet (lower+upper, with diacritics). Forms are filled in paličkové
 # písmo (block capitals); text-field OCR output is constrained to this set so
 # digit/punctuation noise is dropped (ICR "allowed character set" best practice).

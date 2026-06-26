@@ -282,6 +282,19 @@ function confBadge(k, data) {
     + `${flagged ? "⚑ " : ""}${Math.round(c*100)}%</span>`;
 }
 
+function suggestionChip(k, data) {
+  // Phase-6 LLM name suggestion: shown beside the field, NEVER auto-filled. The
+  // reviewer clicks "použiť" to accept it — a human action, not the model committing.
+  const s = (data.suggestions || {})[k];
+  if (!s) return "";
+  const sj = String(s).replace(/'/g, "\\'");
+  return `<span class="sugg" style="margin-left:8px;font-size:11px;color:#1565c0;white-space:nowrap"
+    title="Návrh jazykového modelu — nepotvrdené, skontrolujte podľa skenu">
+    💡 návrh: <b>${s}</b>
+    <button type="button" onclick="document.getElementById('f_${k}').value='${sj}'"
+      style="font-size:10px;margin-left:4px;cursor:pointer">použiť</button></span>`;
+}
+
 function renderFieldList(containerId, spec, data) {
   const box = document.getElementById(containerId);
   box.innerHTML = "";
@@ -299,7 +312,7 @@ function renderFieldList(containerId, spec, data) {
       const v = data.fields[k] || "";
       row.innerHTML = `<span class="field-label">${label}</span>
         <div class="field-val"><input id="f_${k}" type="text" value="${v}"
-          class="${flagged?'warn':'ok'}">${confBadge(k,data)}</div>`;
+          class="${flagged?'warn':'ok'}">${confBadge(k,data)}${suggestionChip(k,data)}</div>`;
     }
     box.appendChild(row);
   }
@@ -362,9 +375,11 @@ function renderResults(data) {
     const meno = data.fields["dieta"+c+"_meno"] || "";
     const rc = data.fields["dieta"+c+"_rod_cislo"] || "";
     if (!meno && !rc) continue;
+    const mk = "dieta"+c+"_meno";
     const wrap = document.createElement("div");
     wrap.innerHTML = `<div class="field-row"><span class="field-label">dieťa ${c}</span>
-      <div class="field-val"><input type="text" value="${meno}" placeholder="meno"></div>
+      <div class="field-val"><input id="f_${mk}" type="text" value="${meno}" placeholder="meno"
+        class="${(data.flagged_fields||[]).includes(mk)?'warn':'ok'}">${confBadge(mk,data)}${suggestionChip(mk,data)}</div>
       <div class="field-val"><input type="text" value="${rc}" placeholder="rodné číslo"></div></div>`;
     wrap.appendChild(monthGridEl("dieta"+c, "Bonus mesiace", data));
     bf.appendChild(wrap);
@@ -478,6 +493,13 @@ async def extract(
     confidences = {f: round(raw_all[f]["confidence"], 3) for f in raw_all}
     thresholds = {f: CONF_THRESHOLD[field_class(f)] for f in raw_all}
 
+    # Phase-6 LLM second-check: name-field SUGGESTIONS (shown beside the scan,
+    # never auto-filled) and the per-field tier source for transparency.
+    suggestions = {f: raw_all[f]["suggestion"] for f in raw_all
+                   if raw_all[f].get("suggestion")}
+    second_check = {f: raw_all[f]["second_check"] for f in raw_all
+                    if raw_all[f].get("second_check")}
+
     issues = list(size_warnings) + [c["msg"] for c in checks]
 
     return JSONResponse({
@@ -488,6 +510,8 @@ async def extract(
         "confidences": confidences,
         "thresholds": thresholds,
         "disambiguated": dis_log,
+        "suggestions": suggestions,
+        "second_check": second_check,
         "page1_b64": _img_to_b64(img_p1),
         "page2_b64": _img_to_b64(img_p2) if img_p2 else None,
     })

@@ -31,9 +31,10 @@ from field_defs import (
     DIGIT_COMB_FIELDS, FUZZY_TEXT_FIELDS, CHECKBOX_FIELDS,
     DIGIT_COMB_CELLS, TEXT_COMB_CELLS, PRIEZVISKO_CELLS, MENO_CELLS,
     WHOLEBOX_INCOME, SLOVAK_ALPHA, CANVAS_W, CANVAS_H,
-    GAZETTEER_FIELDS,
+    GAZETTEER_FIELDS, SEMI_OPEN_FIELDS, NAME_FIELDS,
 )
 from gazetteer import gazetteer_match
+from text_second_check import text_second_check
 
 _SLOVAK_SET = set(SLOVAK_ALPHA)
 
@@ -724,6 +725,38 @@ def _apply_gazetteer(field: str, res: dict) -> dict:
     return res
 
 
+def _apply_text_second_check(field: str, res: dict) -> dict:
+    """Phase-6 scoped LLM tier — fires ONLY when a text field is escalated
+    (confidence below the text threshold). Never on numeric fields (not routed
+    here). Two behaviours:
+
+    - SEMI_OPEN (ulica / obchodné meno): adopt the re-validated LLM-cleaned string
+      and treat it as auditable (clears the review threshold). The model never gets
+      the last word — adoption is gated on deterministic re-validation in
+      text_second_check.
+    - NAME (personal names): NEVER replace the value. Attach the LLM output as
+      res['suggestion'] for the reviewer; the field stays flagged.
+
+    Degrades transparently: if llama-server is unavailable the value is untouched
+    and the field keeps its low-confidence flag (gazetteer-plus-flag behaviour).
+    """
+    if res["confidence"] >= CONF_THRESHOLD["text"]:
+        return res                       # not escalated — leave it alone
+    if not (res.get("value") or "").strip():
+        return res                       # empty (unfilled) field — nothing to check
+
+    res = dict(res)
+    is_name = field in NAME_FIELDS
+    out = text_second_check(field, res["value"], is_name)
+    res["second_check"] = out["source"]
+    if out["source"] == "llm-clean":
+        res["value"] = out["value"]
+        res["confidence"] = max(res["confidence"], 0.85)   # re-validated → auditable
+    elif out["source"] == "llm-suggestion":
+        res["suggestion"] = out["suggestion"]              # shown to human; value kept
+    return res
+
+
 def ocr_page(img: Image.Image, field_boxes: dict) -> dict:
     """Run OCR/occupancy on each field in field_boxes.
 
@@ -748,11 +781,16 @@ def ocr_page(img: Image.Image, field_boxes: dict) -> dict:
         elif field in DIGIT_COMB_FIELDS:
             results[field] = _ocr_digit_comb(img, field)
         elif field in TEXT_FIELDS:
-            results[field] = _ocr_meno_field(img)
+            res = _ocr_meno_field(img)
+            if field in NAME_FIELDS:              # employee name → LLM suggestion tier
+                res = _apply_text_second_check(field, res)
+            results[field] = res
         elif field in FUZZY_TEXT_FIELDS:
             res = _ocr_text_field(img, field)
-            if field in GAZETTEER_FIELDS:
+            if field in GAZETTEER_FIELDS:         # closed set → gazetteer snap
                 res = _apply_gazetteer(field, res)
+            elif field in SEMI_OPEN_FIELDS or field in NAME_FIELDS:
+                res = _apply_text_second_check(field, res)
             results[field] = res
         else:
             text, score = ocr_crop(crop)

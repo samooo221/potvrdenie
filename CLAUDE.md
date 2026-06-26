@@ -103,21 +103,28 @@ non-erroring shift, not a crash.)
 
 ## Implementation status
 **Built** (see STATUS.md for the honest detail): `crop_ocr.py` (OCR pipeline +
-confidence capture + validate/escalate/disambiguate + gazetteer routing),
-`field_defs.py` (per-field geometry + type sets + `GAZETTEER_FIELDS`),
-`gazetteer.py` + `data/{stat,titul,obce}.txt` (closed-set snap, obce pluggable),
-`server.py` (FastAPI review UI with per-field confidence badges + flag reasons),
+confidence capture + validate/escalate/disambiguate + gazetteer + second-check routing;
+multi-width name recon), `field_defs.py` (geometry + type sets incl. `GAZETTEER_FIELDS`/
+`SEMI_OPEN_FIELDS`/`NAME_FIELDS`), `gazetteer.py` + `data/{stat,titul,obce}.txt`
+(closed-set snap, obce pluggable), `text_second_check.py` (Phase-6 scoped LLM tier),
+`server.py` (FastAPI review UI: confidence badges + flag reasons + name suggestions),
 `eval_handwriting.py` (real per-field accuracy + mean confidence harness),
 `generate_samples.py` / `make_handwritten.py` (synthetic data), `align_photo.py`.
-Current: 98.4% on the synthetic printed-font set (1143/1162), ~5.8 fields/form
+Current: 98.5% on the synthetic printed-font set (1144/1162), ~5.8 fields/form
 flagged, confidence reliably catches the genuine misreads.
 
-**Deliberately NOT built** (architecture diverged — this is correct, not missing):
-`extract_potvrdenie.py` / LLM structuring / GBNF as a required stage. **Deferred:**
-the Phase-6 scoped text-second-check LLM tier (needs a local model), Phase-5 ICR,
-and the two-GPU Vulkan rack. Validate on REAL pen-filled forms (eval_handwriting.py)
-before building any of those — current accuracy is "plumbing works," not "reads
-real handwriting." The next-phase plan lives in `NEXT PHASE.md`.
+**Phase 6 (text second-check LLM tier) — code-complete, dormant until a model runs.**
+`text_second_check.py` talks to a LOCAL llama-server (`LLAMA_URL`, default :8080),
+grammar-constrained to Slovak block letters. Fires ONLY on escalated text fields:
+gazetteer (closed sets) → LLM CLEAN+adopt for semi-open (ulica/obchodné meno, re-validated)
+→ LLM SUGGESTION-only for names (never auto-accepted, shown beside the scan). Numbers
+never enter. Degrades to gazetteer-plus-flag if the server is down (verified: identical
+98.5% with no server). To activate: build llama.cpp + run a tiny model on :8080.
+
+**Deliberately NOT built / deferred:** `extract_potvrdenie.py` / LLM *structuring* / GBNF
+as a required stage (dropped on purpose). **Deferred:** Phase-5 ICR and the two-GPU Vulkan
+rack. Validate on REAL pen-filled forms (eval_handwriting.py) before building those —
+current accuracy is "plumbing works," not "reads real handwriting." Plan: `NEXT PHASE.md`.
 
 ## Definition of done (demo)
 A box that boots, processes a synthetic scanned form end-to-end, shows the JSON
