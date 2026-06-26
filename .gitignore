@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+samples/
+hw_samples/
+handnewsample.png
+handsample_*.png
+aligned_*.png
+sample_hand.png
+form_template.png
+test.pdf
+.claude/
