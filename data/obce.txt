@@ -1,0 +1,37 @@
+# Slovak municipality register (obce) — PLUGGABLE reference list.
+#
+# This is a small SEED sample only. Drop the full official register
+# (~2,900 names, from the Štatistický úrad SR / DataCube municipality list)
+# into this file — one municipality per line — to make obec/zam_obec snap to a
+# real town. If a queried name is not in this file, the field degrades to
+# flag-on-miss (it is never silently invented). '#' lines and blanks ignored.
+Bratislava
+Košice
+Prešov
+Žilina
+Nitra
+Banská Bystrica
+Trnava
+Trenčín
+Martin
+Poprad
+Prievidza
+Zvolen
+Považská Bystrica
+Michalovce
+Nové Zámky
+Spišská Nová Ves
+Komárno
+Levice
+Humenné
+Bardejov
+Liptovský Mikuláš
+Ružomberok
+Dunajská Streda
+Piešťany
+Lučenec
+Topoľčany
+Pezinok
+Čadca
+Dolný Kubín
+Rimavská Sobota

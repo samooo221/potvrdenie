@@ -1,0 +1,26 @@
+# Slovak academic / professional titles (paličkové písmo, OCR-noisy).
+# One canonical form per line; '#' lines and blanks ignored.
+Bc.
+Mgr.
+Mgr. art.
+Ing.
+Ing. arch.
+MUDr.
+MDDr.
+MVDr.
+JUDr.
+PhDr.
+RNDr.
+PharmDr.
+PaedDr.
+ThDr.
+ThLic.
+RSDr.
+doc.
+prof.
+PhD.
+ArtD.
+CSc.
+DrSc.
+DiS.
+DiS.art.

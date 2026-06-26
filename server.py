@@ -20,7 +20,11 @@ import uvicorn
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from crop_ocr import ocr_page, validate_gt, compare_text_fuzzy, normalize_rc, normalize_to_canvas
+from crop_ocr import (
+    ocr_page, compare_text_fuzzy, normalize_rc, normalize_to_canvas,
+    build_extracted, disambiguate_extracted, validate_extracted, escalate,
+    CONF_THRESHOLD, field_class,
+)
 from align_photo import try_align
 from field_defs import (
     FIELD_BOXES_P1, FIELD_BOXES_P2, NUMERIC_FIELDS, MONTH_FIELDS, RC_FIELDS,
@@ -263,6 +267,21 @@ async function doExtract() {
   document.getElementById("spinner").style.display = "none";
 }
 
+function confBadge(k, data) {
+  // Per-field confidence badge with the flag reason on hover. ⚑ marks a field
+  // escalated for human review (low confidence or a failed constraint).
+  const c = (data.confidences || {})[k];
+  if (c === undefined) return "";
+  const thr = (data.thresholds || {})[k];
+  const flagged = (data.flagged_fields || []).includes(k);
+  const reasons = (data.field_reasons || {})[k] || [];
+  const title = (reasons.length ? reasons.join(" • ") : "auto-accepted").replace(/"/g, "'");
+  const color = flagged ? "#c62828" : "#2e7d32";
+  return `<span class="conf-badge" title="${title}"
+    style="margin-left:6px;font-size:11px;color:${color};white-space:nowrap;cursor:help">`
+    + `${flagged ? "⚑ " : ""}${Math.round(c*100)}%</span>`;
+}
+
 function renderFieldList(containerId, spec, data) {
   const box = document.getElementById(containerId);
   box.innerHTML = "";
@@ -275,12 +294,12 @@ function renderFieldList(containerId, spec, data) {
       row.innerHTML = `<span class="field-label">${label}</span>
         <div class="field-val"><div class="m-val ${on?'checked':'unchecked'}"
           id="f_${k}" onclick="toggleCheck('${k}')"
-          style="margin:0">${on?"×":""}</div></div>`;
+          style="margin:0">${on?"×":""}</div>${confBadge(k,data)}</div>`;
     } else {
       const v = data.fields[k] || "";
       row.innerHTML = `<span class="field-label">${label}</span>
         <div class="field-val"><input id="f_${k}" type="text" value="${v}"
-          class="${flagged?'warn':'ok'}"></div>`;
+          class="${flagged?'warn':'ok'}">${confBadge(k,data)}</div>`;
     }
     box.appendChild(row);
   }
@@ -314,7 +333,7 @@ function renderResults(data) {
     row.className = "field-row";
     row.innerHTML = `<span class="field-label">${k}</span>
       <div class="field-val"><input id="f_${k}" type="text" value="${v}"
-        class="${flagged?'warn':'ok'}"></div>`;
+        class="${flagged?'warn':'ok'}">${confBadge(k,data)}</div>`;
     inc.appendChild(row);
   }
 
@@ -323,10 +342,12 @@ function renderResults(data) {
   p2inc.innerHTML = "";
   for (const k of P2_INCOME_FIELDS) {
     const v = data.fields[k] || "";
+    const flagged = (data.flagged_fields || []).includes(k);
     const row = document.createElement("div");
     row.className = "field-row";
     row.innerHTML = `<span class="field-label">${k.replace("p2_","")}</span>
-      <div class="field-val"><input id="f_${k}" type="text" value="${v}" class="ok"></div>`;
+      <div class="field-val"><input id="f_${k}" type="text" value="${v}"
+        class="${flagged?'warn':'ok'}">${confBadge(k,data)}</div>`;
     p2inc.appendChild(row);
   }
   // page-2 income month grids (r10, r13)
@@ -352,13 +373,25 @@ function renderResults(data) {
   renderFieldList("employerFields", EMPLOYER_FIELDS, data);
 
   const issues = data.validation_issues || [];
+  const flaggedN = (data.flagged_fields || []).length;
+  const dis = data.disambiguated || [];
   const vbox = document.getElementById("validationBox");
+  let html = "";
+  if (dis.length) {
+    const items = dis.map(d => `<div class="val-issue">↻ ${d}</div>`).join("");
+    html += `<div class="validation" style="background:#e3f2fd;border-color:#64b5f6">`
+          + `Automaticky zosúladené (nízka istota + ohraničenie):${items}</div>`;
+  }
   if (issues.length === 0) {
-    vbox.innerHTML = `<div class="validation ok-box">✓ Validácia: aritmetika OK, rodné číslo OK</div>`;
+    html += `<div class="validation ok-box">✓ Validácia extrakcie: aritmetika OK, rodné číslo OK</div>`;
   } else {
     const items = issues.map(i => `<div class="val-issue">⚠ ${i}</div>`).join("");
-    vbox.innerHTML = `<div class="validation warn-box">✗ Validácia zlyhala:${items}</div>`;
+    html += `<div class="validation warn-box">✗ Validácia extrakcie zlyhala:${items}</div>`;
   }
+  html += flaggedN
+    ? `<div class="validation warn-box">⚑ ${flaggedN} pol'í označených na kontrolu (nízka istota alebo zlyhané ohraničenie). Najdite ⚑ pri poli; dôvod je v bubline.</div>`
+    : `<div class="validation ok-box">✓ Žiadne pole nevyžaduje kontrolu — všetko automaticky prijaté.</div>`;
+  vbox.innerHTML = html;
 }
 
 function toggleMonth(i) {
@@ -434,35 +467,27 @@ async def extract(
     raw_p2 = ocr_page(img_p2, FIELD_BOXES_P2) if img_p2 else {}
     raw_all = {**raw_p1, **raw_p2}
 
-    fields: dict = {}
-    flagged: list[str] = []
+    # Normalize OCR output → final values, reconcile low-confidence digit fields
+    # against form constraints, then validate the EXTRACTION (not ground truth).
+    fields = build_extracted(raw_all)
+    fields, dis_log = disambiguate_extracted(raw_all, fields)
+    checks = validate_extracted(fields)
+    flagged, reasons = escalate(raw_all, fields, checks)
 
-    from crop_ocr import normalize_decimal
-    for field, raw in raw_all.items():
-        if field in MONTH_FIELDS or field in CHECKBOX_FIELDS:
-            dark_frac, occupied = raw
-            fields[field] = occupied
-        elif field in NUMERIC_FIELDS:
-            val = normalize_decimal(raw)
-            fields[field] = val
-            # Flag if we couldn't extract a valid decimal
-            if not val or not any(c.isdigit() for c in val):
-                flagged.append(field)
-        elif field in RC_FIELDS:
-            fields[field] = normalize_rc(raw)
-        elif field in DIGIT_COMB_FIELDS:
-            fields[field] = "".join(c for c in str(raw) if c.isdigit())
-        else:
-            # name + free-text address fields
-            fields[field] = (raw or "").strip()
+    # Per-field confidence + a flag threshold for the UI badge.
+    confidences = {f: round(raw_all[f]["confidence"], 3) for f in raw_all}
+    thresholds = {f: CONF_THRESHOLD[field_class(f)] for f in raw_all}
 
-    # Validate (surface input-size warnings alongside form-validation issues)
-    issues = list(size_warnings) + validate_gt(fields)
+    issues = list(size_warnings) + [c["msg"] for c in checks]
 
     return JSONResponse({
         "fields": fields,
         "validation_issues": issues,
         "flagged_fields": flagged,
+        "field_reasons": reasons,
+        "confidences": confidences,
+        "thresholds": thresholds,
+        "disambiguated": dis_log,
         "page1_b64": _img_to_b64(img_p1),
         "page2_b64": _img_to_b64(img_p2) if img_p2 else None,
     })

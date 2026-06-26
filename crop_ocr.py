@@ -31,9 +31,39 @@ from field_defs import (
     DIGIT_COMB_FIELDS, FUZZY_TEXT_FIELDS, CHECKBOX_FIELDS,
     DIGIT_COMB_CELLS, TEXT_COMB_CELLS, PRIEZVISKO_CELLS, MENO_CELLS,
     WHOLEBOX_INCOME, SLOVAK_ALPHA, CANVAS_W, CANVAS_H,
+    GAZETTEER_FIELDS,
 )
+from gazetteer import gazetteer_match
 
 _SLOVAK_SET = set(SLOVAK_ALPHA)
+
+# --- Confidence / escalation thresholds -------------------------------------
+# A single OCR'd cell whose rec_score is below this is "uncertain" and recorded
+# in low_conf_cells (and is the only kind of cell constraint-guided
+# disambiguation is allowed to alter — see disambiguate_extracted).
+CELL_LOW_CONF = 0.85
+# Per field-class escalation threshold: a field whose aggregated confidence is
+# below its class threshold is FLAGGED for human review. Numeric fields are
+# validated by arithmetic/mod-11 so we hold them to a higher bar; free text is
+# inherently noisier (paličkové písmo) so a lower bar avoids flagging everything.
+# These are placeholders — recalibrate from eval_handwriting.py once real
+# pen-filled samples exist.
+# Placeholder values, calibrated against the synthetic set so that genuine
+# misreads flag while correct fields mostly don't. Recalibrate from
+# eval_handwriting.py once real pen-filled samples exist — the occupancy band is
+# deliberately narrow (only marks sitting in the 0.07–0.13 dark-fraction
+# no-man's-land near the 0.10 cutoff escalate).
+CONF_THRESHOLD = {"numeric": 0.80, "text": 0.70, "occupancy": 0.30}
+
+
+def field_class(field: str) -> str:
+    """Coarse class of a field, for picking a confidence threshold."""
+    if field in MONTH_FIELDS or field in CHECKBOX_FIELDS:
+        return "occupancy"
+    if field in TEXT_FIELDS or field in FUZZY_TEXT_FIELDS:
+        return "text"
+    return "numeric"
+
 
 _rec_model = None     # PP-OCRv6 — digits (proven 100% on numeric cells)
 _text_model = None    # latin_PP-OCRv5 — Slovak free text (full diacritic dictionary)
@@ -91,23 +121,32 @@ def cell_is_occupied(pil_crop: Image.Image, cutoff: float = 0.10) -> tuple[float
     return dark_frac, dark_frac > cutoff
 
 
-def ocr_crop(pil_crop: Image.Image) -> str:
+def ocr_crop(pil_crop: Image.Image) -> tuple[str, float]:
+    """OCR a digit crop with PP-OCRv6. Returns (text, rec_score).
+
+    rec_score is PaddleOCR's per-prediction confidence — the keystone primitive
+    for the human-in-the-loop escalation path (low score → flag for review).
+    Empty result → ("", 0.0).
+    """
     rec = get_rec_model()
     arr = np.array(pil_crop.convert("RGB"))
     results = list(rec.predict(arr))
     if not results:
-        return ""
-    return results[0].get("rec_text", "").strip()
+        return "", 0.0
+    return results[0].get("rec_text", "").strip(), float(results[0].get("rec_score", 0.0))
 
 
-def ocr_text_crop(pil_crop: Image.Image) -> str:
-    """OCR a free-text crop with the Latin (Slovak-capable) model."""
+def ocr_text_crop(pil_crop: Image.Image) -> tuple[str, float]:
+    """OCR a free-text crop with the Latin (Slovak-capable) model.
+
+    Returns (text, rec_score); empty result → ("", 0.0).
+    """
     rec = get_text_model()
     arr = np.array(pil_crop.convert("RGB"))
     results = list(rec.predict(arr))
     if not results:
-        return ""
-    return results[0].get("rec_text", "").strip()
+        return "", 0.0
+    return results[0].get("rec_text", "").strip(), float(results[0].get("rec_score", 0.0))
 
 
 def normalize_decimal(s: str) -> str:
@@ -226,75 +265,220 @@ def compare_field(field: str, gt_val, ocr_raw) -> tuple[bool, str, str]:
     return match, gt_str, ocr_raw or "(empty)"
 
 
-def validate_gt(gt: dict) -> list[str]:
+def _run_checks(d: dict) -> list[dict]:
+    """Deterministic form checks over a value dict. Returns structured issues
+    [{"fields": [...], "msg": "..."}] so callers can both display the message and
+    map a failed constraint back to the field(s) that must be flagged.
+
+    The SAME body powers two callers with opposite intent: validate_gt (a
+    generator self-test on synthetic ground truth) and validate_extracted (the
+    production check, run on OCR output to catch recognition errors).
+    """
     from decimal import Decimal
-    issues = []
+    issues: list[dict] = []
+
+    def add(fields, msg):
+        issues.append({"fields": list(fields), "msg": msg})
+
     try:
-        r01 = Decimal(gt["riadok_01"])
-        r02 = Decimal(gt["riadok_02"])
-        r03 = Decimal(gt["riadok_03"])
+        r01 = Decimal(d["riadok_01"])
+        r02 = Decimal(d["riadok_02"])
+        r03 = Decimal(d["riadok_03"])
         if r01 - r02 != r03:
-            issues.append(f"arithmetic: r01({r01}) − r02({r02}) = {r01-r02} ≠ r03({r03})")
+            add(("riadok_01", "riadok_02", "riadok_03"),
+                f"arithmetic: r01({r01}) − r02({r02}) = {r01-r02} ≠ r03({r03})")
     except Exception as e:
-        issues.append(f"arithmetic-parse-error: {e}")
+        add(("riadok_01", "riadok_02", "riadok_03"), f"arithmetic-parse-error: {e}")
 
     # rodné číslo: format + mod-11 for employee and every (non-empty) child.
     for rcf in sorted(RC_FIELDS):
-        rc = gt.get(rcf, "")
+        rc = d.get(rcf, "")
         if not rc and rcf != "rod_cislo":
             continue                      # blank child row — nothing to validate
         m = re.fullmatch(r"(\d{6})/(\d{4})", rc)
         if not m:
-            issues.append(f"{rcf} format: {rc!r}")
+            add((rcf,), f"{rcf} format: {rc!r}")
         elif int(m.group(1) + m.group(2)) % 11 != 0:
-            issues.append(f"{rcf} mod-11 failed: {rc!r}")
+            add((rcf,), f"{rcf} mod-11 failed: {rc!r}")
 
     # Page-2 top rodné číslo must match page-1's (same taxpayer, page matching).
-    if gt.get("rod_cislo_p2") and gt.get("rod_cislo_p2") != gt.get("rod_cislo"):
-        issues.append(f"rod_cislo_p2 {gt['rod_cislo_p2']!r} ≠ page-1 {gt.get('rod_cislo')!r}")
+    if d.get("rod_cislo_p2") and d.get("rod_cislo_p2") != d.get("rod_cislo"):
+        add(("rod_cislo_p2", "rod_cislo"),
+            f"rod_cislo_p2 {d['rod_cislo_p2']!r} ≠ page-1 {d.get('rod_cislo')!r}")
 
     # DIČ (employer tax ID): exactly 10 digits.
-    if gt.get("zam_dic"):
-        dic = _digits_only(gt["zam_dic"])
+    if d.get("zam_dic"):
+        dic = _digits_only(d["zam_dic"])
         if len(dic) != 10:
-            issues.append(f"zam_dic (need 10 digits): {gt['zam_dic']!r}")
+            add(("zam_dic",), f"zam_dic (need 10 digits): {d['zam_dic']!r}")
 
     # PSČ: exactly 5 digits
-    if "psc" in gt:
-        psc = _digits_only(gt["psc"])
+    if "psc" in d:
+        psc = _digits_only(d["psc"])
         if len(psc) != 5:
-            issues.append(f"psc format (need 5 digits): {gt['psc']!r}")
+            add(("psc",), f"psc format (need 5 digits): {d['psc']!r}")
 
     # Rok: plausible assessment year
-    if "rok" in gt:
-        rok = _digits_only(gt["rok"])
+    if "rok" in d:
+        rok = _digits_only(d["rok"])
         year = int(rok) if rok else 0
         # 2-digit suffix means 20YY; 4-digit means full year
         if len(rok) == 2:
             year = 2000 + int(rok)
         if not (2000 <= year <= 2099):
-            issues.append(f"rok out of range 2000–2099: {gt['rok']!r}")
+            add(("rok",), f"rok out of range 2000–2099: {d['rok']!r}")
 
     # Dátum narodenia ⇄ rodné číslo cross-check: DDMMYYYY's YYMMDD must equal
     # the first 6 digits of rod_cislo. Strongest new deterministic check.
-    if "datum_narodenia" in gt and m:
-        d = _digits_only(gt["datum_narodenia"])
-        if len(d) == 8:
-            dd, mm, yyyy = d[0:2], d[2:4], d[4:8]
+    rcm = re.fullmatch(r"(\d{6})/(\d{4})", d.get("rod_cislo", "") or "")
+    if "datum_narodenia" in d and rcm:
+        dn = _digits_only(d["datum_narodenia"])
+        if len(dn) == 8:
+            dd, mm, yyyy = dn[0:2], dn[2:4], dn[4:8]
             try:
                 from datetime import date
                 date(int(yyyy), int(mm), int(dd))   # calendar validity
-                rc_yymmdd = m.group(1)
+                rc_yymmdd = rcm.group(1)
                 # rod_cislo month may be +50 (female); compare day+year, month mod 50
                 rc_yy, rc_mm, rc_dd = rc_yymmdd[0:2], rc_yymmdd[2:4], rc_yymmdd[4:6]
                 rc_mm_norm = f"{int(rc_mm) % 50:02d}"
                 if (yyyy[2:], mm, dd) != (rc_yy, rc_mm_norm, rc_dd):
-                    issues.append(
+                    add(("datum_narodenia", "rod_cislo"),
                         f"datum_narodenia {dd}.{mm}.{yyyy} ≠ rod_cislo {rc_yymmdd}")
             except ValueError:
-                issues.append(f"datum_narodenia invalid date: {gt['datum_narodenia']!r}")
+                add(("datum_narodenia",),
+                    f"datum_narodenia invalid date: {d['datum_narodenia']!r}")
 
     return issues
+
+
+def validate_gt(gt: dict) -> list[str]:
+    """Generator self-test: confirm the SYNTHETIC ground truth is internally
+    consistent. NOT the production check — that is validate_extracted."""
+    return [c["msg"] for c in _run_checks(gt)]
+
+
+def validate_extracted(extracted: dict) -> list[dict]:
+    """Production check: run the deterministic form rules on OCR-EXTRACTED values
+    to catch recognition errors. Returns structured issues (see _run_checks)."""
+    return _run_checks(extracted)
+
+
+def build_extracted(raw_all: dict) -> dict:
+    """Turn ocr_page's {field: {value, ...}} into final normalized field values
+    {field: value}. Single source of truth for the per-type normalization the
+    server UI and the CLI harness both need (occupancy → bool, income →
+    decimal, rodné číslo → 'DDDDDD/DDDD', digit comb → digits, text → stripped).
+    """
+    fields: dict = {}
+    for field, res in raw_all.items():
+        raw = res["value"]
+        if field in MONTH_FIELDS or field in CHECKBOX_FIELDS:
+            _dark_frac, occupied = raw
+            fields[field] = occupied
+        elif field in NUMERIC_FIELDS or field in WHOLEBOX_INCOME:
+            fields[field] = normalize_decimal(raw)
+        elif field in RC_FIELDS:
+            fields[field] = normalize_rc(raw)
+        elif field in DIGIT_COMB_FIELDS:
+            fields[field] = _digits_only(raw)
+        else:
+            fields[field] = (raw or "").strip()
+    return fields
+
+
+def escalate(raw_all: dict, extracted: dict, checks: list[dict]) -> tuple[list[str], dict]:
+    """Decide which fields a human must review. A field is FLAGGED if its
+    confidence is below its class threshold OR it participates in a failed
+    constraint; everything else auto-accepts. Returns (sorted_flagged, reasons)
+    where reasons maps field → list of human-readable reason strings.
+    """
+    reasons: dict[str, list[str]] = defaultdict(list)
+
+    for field, res in raw_all.items():
+        # A blank field has nothing recognized to be uncertain about — don't flag
+        # it on confidence (a faint speck below the ink gate can otherwise zero the
+        # score of an unfilled box). A required field left blank is still caught by
+        # the validation constraints below (e.g. rodné-číslo format).
+        v = extracted.get(field)
+        if isinstance(v, str) and not v.strip():
+            continue
+        thr = CONF_THRESHOLD[field_class(field)]
+        if res["confidence"] < thr:
+            reasons[field].append(
+                f"low confidence {res['confidence']:.2f} < {thr:.2f}")
+
+    # A numeric field that produced no usable digit is unreadable, not just
+    # low-confidence — always flag (preserves the original server behaviour).
+    for field in NUMERIC_FIELDS:
+        v = extracted.get(field)
+        if v is not None and (not v or not any(c.isdigit() for c in v)):
+            reasons[field].append("no valid decimal extracted")
+
+    for c in checks:
+        for f in c["fields"]:
+            reasons[f].append(f"constraint: {c['msg']}")
+
+    return sorted(reasons), dict(reasons)
+
+
+def _reform_value(field: str, digits: str) -> str:
+    """Re-insert the structural separator for a digit field's value string."""
+    if field in RC_FIELDS and len(digits) == _RC_N_LEFT + 4:
+        return digits[:_RC_N_LEFT] + "/" + digits[_RC_N_LEFT:]
+    if (field in NUMERIC_FIELDS or field in WHOLEBOX_INCOME) and len(digits) >= _N_DECIMAL:
+        return digits[:-_N_DECIMAL] + "." + digits[-_N_DECIMAL:]
+    return digits
+
+
+def disambiguate_extracted(raw_all: dict, extracted: dict) -> tuple[dict, list[str]]:
+    """Constraint-guided disambiguation (Phase 3).
+
+    When a digit field fails a constraint AND has low-confidence cells, search
+    digit substitutions over ONLY those low-confidence cells for an assignment
+    that satisfies the constraint, and adopt it. Currently covers the
+    self-contained per-field constraints (rodné-číslo mod-11). Mutates and
+    returns a corrected copy of `extracted` plus a log of what changed.
+
+    HARD RULE: a field whose cells are all high-confidence is never altered —
+    if it still violates a constraint, that is a real inconsistency to FLAG, not
+    silently "correct". Enforced by only ever varying low_conf_cells.
+    """
+    from itertools import product
+    fixed = dict(extracted)
+    log: list[str] = []
+
+    for field in sorted(RC_FIELDS):
+        res = raw_all.get(field)
+        if not res or not res["cells"]:
+            continue
+        low = res["low_conf_cells"]
+        if not low or len(low) > 3:        # nothing uncertain, or search too wide
+            continue
+        digits = [c for c, _ in res["cells"]]
+        if len(digits) != _RC_N_LEFT + 4:
+            continue
+        # already valid? skip
+        cur = "".join(digits)
+        if cur.isdigit() and int(cur) % 11 == 0:
+            continue
+        # search digit assignments over the low-confidence positions only
+        found = None
+        for combo in product("0123456789", repeat=len(low)):
+            trial = list(digits)
+            for idx, dch in zip(low, combo):
+                trial[idx] = dch
+            s = "".join(trial)
+            if s.isdigit() and int(s) % 11 == 0:
+                found = s
+                break
+        if found and found != cur:
+            new_val = _reform_value(field, found)
+            log.append(f"{field}: {_reform_value(field, cur)} → {new_val} "
+                       f"(mod-11 via low-conf cells {low})")
+            fixed[field] = new_val
+
+    return fixed, log
 
 
 def _cell_ink(img: Image.Image, cell) -> float:
@@ -304,14 +488,43 @@ def _cell_ink(img: Image.Image, cell) -> float:
     return float(np.sum(arr < 200) / arr.size)
 
 
-def _ocr_cell(img: Image.Image, cell) -> str:
-    """OCR one digit cell; return only the digit characters."""
+def _ocr_cell(img: Image.Image, cell) -> tuple[str, float]:
+    """OCR one digit cell; return (digit-only text, rec_score)."""
     x1, y1, x2, y2 = cell
-    text = ocr_crop(img.crop((x1, y1, x2, y2)))
-    return "".join(c for c in text if c.isdigit())
+    text, score = ocr_crop(img.crop((x1, y1, x2, y2)))
+    return "".join(c for c in text if c.isdigit()), score
 
 
-def _ocr_income_wholebox(img: Image.Image, box) -> str:
+def _field_result(value, cells: list[tuple[str, float]]) -> dict:
+    """Bundle a recognized value with per-cell confidence.
+
+    `cells` is the ordered list of (char, rec_score) that produced the digit
+    sequence in `value`. Field confidence is the MIN over cells — a field is
+    only as trustworthy as its weakest cell. low_conf_cells indexes the cells
+    (within `cells`) below CELL_LOW_CONF; those are the only cells that
+    constraint-guided disambiguation is permitted to alter.
+    """
+    scores = [s for _, s in cells]
+    conf = min(scores) if scores else 1.0
+    low = [i for i, (_, s) in enumerate(cells) if s < CELL_LOW_CONF]
+    return {"value": value, "confidence": conf, "low_conf_cells": low, "cells": cells}
+
+
+def _text_result(value: str, score: float) -> dict:
+    """Result bundle for a single whole-string OCR (text / whole-box)."""
+    return {"value": value, "confidence": score, "low_conf_cells": [], "cells": []}
+
+
+def _occupancy_result(dark_frac: float, occupied: bool, cutoff: float = 0.10) -> dict:
+    """Result bundle for an ink-occupancy field. Confidence grows with distance
+    from the decision cutoff — a mark sitting right on the threshold is the
+    uncertain one."""
+    conf = min(1.0, abs(dark_frac - cutoff) / cutoff) if cutoff else 1.0
+    return {"value": (dark_frac, occupied), "confidence": conf,
+            "low_conf_cells": [], "cells": []}
+
+
+def _ocr_income_wholebox(img: Image.Image, box) -> dict:
     """Whole-box OCR for the small page-2 continuation-income value boxes.
 
     Per-cell OCR is fragile on these faint isolated digits; reading the whole
@@ -322,11 +535,12 @@ def _ocr_income_wholebox(img: Image.Image, box) -> str:
     w, h = img.size
     crop = img.crop((max(0, x1 - 4), max(0, y1 - 6), min(w, x2 + 4), min(h, y2 + 6)))
     crop = crop.resize((crop.width * 2, crop.height * 2), Image.LANCZOS)
-    return ocr_crop(crop)
+    text, score = ocr_crop(crop)
+    return _text_result(text, score)
 
 
-def _ocr_income_field(img: Image.Image, field: str) -> str:
-    """Per-cell OCR for income digit fields. Returns 'NNNNN.CC' string.
+def _ocr_income_field(img: Image.Image, field: str) -> dict:
+    """Per-cell OCR for income digit fields. Returns a _field_result for 'NNNNN.CC'.
 
     OCRs each 24×36px digit cell individually to avoid confusion from the
     comma gap and empty cells in wide-box crops. Integer cells are skipped
@@ -337,51 +551,69 @@ def _ocr_income_field(img: Image.Image, field: str) -> str:
     dec_cells = cells[-_N_DECIMAL:]
 
     int_digits = []
+    details: list[tuple[str, float]] = []
     for cell in int_cells:
         if _cell_ink(img, cell) > 0.02:  # cell has ink
-            d = _ocr_cell(img, cell)
-            int_digits.append(d[-1] if d else "?")
+            d, score = _ocr_cell(img, cell)
+            ch = d[-1] if d else "?"
+            int_digits.append(ch)
+            details.append((ch, score))
 
     dec_digits = []
     for cell in dec_cells:
-        d = _ocr_cell(img, cell)
-        dec_digits.append(d[-1] if d else "0")
+        d, score = _ocr_cell(img, cell)
+        ch = d[-1] if d else "0"
+        dec_digits.append(ch)
+        # Only an INKED cell carries recognition uncertainty. A blank cell is
+        # confidently blank (→ '0'); counting its noise-level score would drag a
+        # correctly-read empty field's confidence down and cause a false flag.
+        if _cell_ink(img, cell) > 0.02:
+            details.append((ch, score))
 
     int_part = "".join(int_digits) if int_digits else "0"
-    return int_part + "." + "".join(dec_digits)
+    value = int_part + "." + "".join(dec_digits)
+    return _field_result(value, details)
 
 
-def _ocr_rc_field(img: Image.Image, field: str = "rod_cislo") -> str:
-    """Per-cell digit OCR for a rodné číslo field. Returns 'DDDDDD/DDDD'.
+def _ocr_rc_field(img: Image.Image, field: str = "rod_cislo") -> dict:
+    """Per-cell digit OCR for a rodné číslo field. Returns a _field_result for
+    'DDDDDD/DDDD'.
 
     OCRs each digit cell individually and inserts the slash programmatically
     between the 6th and 7th digit, so the pre-printed '/' is never OCR'd. Works
     for the employee rodné číslo and each child's (RC_CELLS[field]). Empty cells
-    (a blank child row) yield an empty string rather than '??????/????'.
+    (a blank child row) yield an empty value rather than '??????/????'.
     """
     digits = []
+    details: list[tuple[str, float]] = []
     for cell in RC_CELLS[field]:
         if _cell_ink(img, cell) <= 0.02:   # blank cell — unfilled row
             continue
-        d = _ocr_cell(img, cell)
-        digits.append(d[-1] if d else "?")
+        d, score = _ocr_cell(img, cell)
+        ch = d[-1] if d else "?"
+        digits.append(ch)
+        details.append((ch, score))
     if not digits:
-        return ""
-    return "".join(digits[:_RC_N_LEFT]) + "/" + "".join(digits[_RC_N_LEFT:])
+        return _field_result("", [])
+    value = "".join(digits[:_RC_N_LEFT]) + "/" + "".join(digits[_RC_N_LEFT:])
+    return _field_result(value, details)
 
 
-def _ocr_digit_comb(img: Image.Image, field: str) -> str:
+def _ocr_digit_comb(img: Image.Image, field: str) -> dict:
     """Per-cell digit OCR for an integer comb field (datum/rok/psc/supisne).
 
     Empty cells are skipped (gated on ink), so partially-filled fields don't
-    inject spurious digits. Returns the concatenated digit string.
+    inject spurious digits. Returns a _field_result for the concatenated digits.
     """
     digits = []
+    details: list[tuple[str, float]] = []
     for cell in DIGIT_COMB_CELLS[field]:
         if _cell_ink(img, cell) > 0.02:
-            d = _ocr_cell(img, cell)
-            digits.append(d[-1] if d else "?")
-    return "".join(digits)
+            d, score = _ocr_cell(img, cell)
+            ch = d[-1] if d else "?"
+            digits.append(ch)
+            details.append((ch, score))
+    return _field_result("".join(digits), details)
 
 
 def _filter_slovak_text(s: str) -> str:
@@ -395,8 +627,8 @@ def _filter_slovak_text(s: str) -> str:
     return " ".join(out.split())
 
 
-def _ocr_comb_text(img: Image.Image, cells, inner: float = 0.62) -> str:
-    """Read a free-text comb field by reconstructing the word.
+def _ocr_comb_text(img: Image.Image, cells, inner: float = 0.62) -> tuple[str, float]:
+    """Read a free-text comb field by reconstructing the word. Returns (text, score).
 
     Comb fields put one letter per box with vertical tick dividers between them.
     Whole-box OCR reads those dividers and gaps as junk ("Slovenská" →
@@ -413,7 +645,7 @@ def _ocr_comb_text(img: Image.Image, cells, inner: float = 0.62) -> str:
         m = int((x2 - x1) * (1 - inner) / 2)
         tiles.append(img.crop((x1 + m, y1, x2 - m, y2)))
     if not tiles:
-        return ""
+        return "", 1.0          # empty (unfilled) field — not low-confidence
     h = max(t.height for t in tiles)
     w = sum(t.width for t in tiles)
     strip = Image.new("L", (w + 8, h + 8), 255)
@@ -421,29 +653,58 @@ def _ocr_comb_text(img: Image.Image, cells, inner: float = 0.62) -> str:
     for t in tiles:
         strip.paste(t, (x, 4))
         x += t.width
-    return _filter_slovak_text(ocr_text_crop(strip))
+    text, score = ocr_text_crop(strip)
+    return _filter_slovak_text(text), score
 
 
-def _ocr_text_field(img: Image.Image, field: str) -> str:
+def _ocr_text_field(img: Image.Image, field: str) -> dict:
     """Free-text comb field (titul/ulica/obec/stat) via gapless reconstruction."""
-    return _ocr_comb_text(img, TEXT_COMB_CELLS[field])
+    text, score = _ocr_comb_text(img, TEXT_COMB_CELLS[field])
+    return _text_result(text, score)
 
 
-def _ocr_meno_field(img: Image.Image) -> str:
+def _ocr_meno_field(img: Image.Image) -> dict:
     """Surname (Priezvisko comb) + given name (Meno comb), reconstructed words."""
-    sur = _ocr_comb_text(img, PRIEZVISKO_CELLS)
-    giv = _ocr_comb_text(img, MENO_CELLS)
-    return f"{sur} {giv}".strip()
+    sur, s_sur = _ocr_comb_text(img, PRIEZVISKO_CELLS)
+    giv, s_giv = _ocr_comb_text(img, MENO_CELLS)
+    return _text_result(f"{sur} {giv}".strip(), min(s_sur, s_giv))
+
+
+def _apply_gazetteer(field: str, res: dict) -> dict:
+    """Snap a closed-set text field to its reference list (gazetteer tier).
+
+    On a list hit: adopt the canonical value and treat it as trustworthy (a
+    known-register value is auditable, so it clears the review threshold). On a
+    miss with a non-empty reading: keep the raw OCR but zero the confidence so it
+    is FLAGGED — we never invent a value not in the list. Empty (unfilled) fields
+    are left untouched. The match record is kept on `res['gazetteer']` for the UI.
+    """
+    res = dict(res)
+    g = gazetteer_match(field, res["value"])
+    res["gazetteer"] = g
+    if g["matched"]:
+        res["value"] = g["value"]
+        res["confidence"] = max(res["confidence"], 0.85)
+    elif res["value"].strip():
+        res["confidence"] = 0.0          # real reading, not in register → review
+    return res
 
 
 def ocr_page(img: Image.Image, field_boxes: dict) -> dict:
-    """Run OCR/occupancy on each field in field_boxes; return {field: raw_result}."""
+    """Run OCR/occupancy on each field in field_boxes.
+
+    Returns {field: {value, confidence, low_conf_cells, cells}}. `value` is the
+    same payload the pipeline used before (digit/text string, or a
+    (dark_frac, occupied) tuple for occupancy fields); the extra keys carry the
+    per-field confidence used for escalation and disambiguation.
+    """
     results = {}
     for field, box in field_boxes.items():
         x1, y1, x2, y2 = box
         crop = img.crop((x1, y1, x2, y2))
         if field in MONTH_FIELDS or field in CHECKBOX_FIELDS:
-            results[field] = cell_is_occupied(crop)
+            dark_frac, occupied = cell_is_occupied(crop)
+            results[field] = _occupancy_result(dark_frac, occupied)
         elif field in WHOLEBOX_INCOME:
             results[field] = _ocr_income_wholebox(img, box)   # short box → padded whole-box
         elif field in NUMERIC_FIELDS:
@@ -455,9 +716,13 @@ def ocr_page(img: Image.Image, field_boxes: dict) -> dict:
         elif field in TEXT_FIELDS:
             results[field] = _ocr_meno_field(img)
         elif field in FUZZY_TEXT_FIELDS:
-            results[field] = _ocr_text_field(img, field)
+            res = _ocr_text_field(img, field)
+            if field in GAZETTEER_FIELDS:
+                res = _apply_gazetteer(field, res)
+            results[field] = res
         else:
-            results[field] = ocr_crop(crop)
+            text, score = ocr_crop(crop)
+            results[field] = _text_result(text, score)
     return results
 
 
@@ -477,25 +742,46 @@ def process_sample(png_p1: Path, png_p2: Path | None, json_path: Path) -> dict[s
     raw_p2 = ocr_page(img_p2, FIELD_BOXES_P2) if img_p2 else {}
     raw_all = {**raw_p1, **raw_p2}
 
+    # Production pipeline: normalize → disambiguate low-confidence digit fields
+    # against constraints → validate the EXTRACTION → decide which fields escalate.
+    extracted = build_extracted(raw_all)
+    extracted, dis_log = disambiguate_extracted(raw_all, extracted)
+    ex_checks = validate_extracted(extracted)
+    flagged, reasons = escalate(raw_all, extracted, ex_checks)
+    flagged_set = set(flagged)
+
     field_results = {}
-    for field, raw in raw_all.items():
+    for field, res in raw_all.items():
         gt_val = gt.get(field)
         if gt_val is None:
             continue
+        raw = res["value"]
         match, gt_disp, ocr_disp = compare_field(field, gt_val, raw)
         field_results[field] = match
         tick = "✓" if match else "✗"
         note = " *" if field in broken_fields else ""
-        print(f"  {field:<20} | GT: {gt_disp:<22} | OCR: {ocr_disp:<22} | {tick}{note}")
+        flag = " ⚑" if field in flagged_set else ""   # authoritative escalate decision
+        print(f"  {field:<20} | GT: {gt_disp:<22} | OCR: {ocr_disp:<22} "
+              f"| {tick}{note} | conf {res['confidence']:.2f}{flag}")
 
+    # Generator self-test (synthetic data is internally consistent).
     if not is_broken:
-        issues = validate_gt(gt)
-        if issues:
-            print("  [!] VALIDATION ISSUES:")
-            for iss in issues:
+        gt_issues = validate_gt(gt)
+        if gt_issues:
+            print("  [!] GROUND-TRUTH SELF-TEST FAILED:")
+            for iss in gt_issues:
                 print(f"      {iss}")
-        else:
-            print("  [✓] validation: arithmetic OK, rod_cislo mod-11 OK")
+
+    for line in dis_log:
+        print(f"  [~] disambiguated {line}")
+    if ex_checks:
+        print("  [!] EXTRACTION VALIDATION ISSUES:")
+        for c in ex_checks:
+            print(f"      {c['msg']}")
+    if flagged:
+        print(f"  [⚑] {len(flagged)} field(s) flagged for review: {', '.join(flagged)}")
+    else:
+        print("  [✓] extraction: all fields auto-accepted (no flags)")
 
     return field_results
 
@@ -540,17 +826,35 @@ def process_live(paths: list[Path]) -> None:
 
     raw_p1 = ocr_page(img_p1, FIELD_BOXES_P1)
     raw_p2 = ocr_page(img_p2, FIELD_BOXES_P2) if img_p2 else {}
+    raw_all = {**raw_p1, **raw_p2}
 
-    for field, raw in raw_p1.items():
-        if field in MONTH_FIELDS:
-            dark_frac, occupied = raw
-            print(f"  {field:<20} | {'X' if occupied else '.'} ({dark_frac*100:.1f}% dark)")
+    # Real photos get the SAME production validation + escalation as the UI.
+    extracted = build_extracted(raw_all)
+    extracted, dis_log = disambiguate_extracted(raw_all, extracted)
+    ex_checks = validate_extracted(extracted)
+    flagged, _reasons = escalate(raw_all, extracted, ex_checks)
+    flagged_set = set(flagged)
+
+    for field, res in raw_all.items():
+        conf = res["confidence"]
+        flag = " ⚑" if field in flagged_set else ""   # authoritative escalate decision
+        if field in MONTH_FIELDS or field in CHECKBOX_FIELDS:
+            dark_frac, occupied = res["value"]
+            print(f"  {field:<20} | {'X' if occupied else '.'} ({dark_frac*100:.1f}% dark)"
+                  f" | conf {conf:.2f}{flag}")
         else:
-            print(f"  {field:<20} | {raw}")
+            print(f"  {field:<20} | {res['value']:<24} | conf {conf:.2f}{flag}")
 
-    for field, raw in raw_p2.items():
-        dark_frac, occupied = raw
-        print(f"  {field:<20} | {'X' if occupied else '.'} ({dark_frac*100:.1f}% dark)")
+    for line in dis_log:
+        print(f"  [~] disambiguated {line}")
+    if ex_checks:
+        print("  [!] EXTRACTION VALIDATION ISSUES:")
+        for c in ex_checks:
+            print(f"      {c['msg']}")
+    if flagged:
+        print(f"  [⚑] {len(flagged)} field(s) flagged for review: {', '.join(flagged)}")
+    else:
+        print("  [✓] extraction: all fields auto-accepted (no flags)")
 
 
 def main() -> None:

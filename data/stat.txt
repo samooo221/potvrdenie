@@ -1,0 +1,20 @@
+# Country names as written on POT395 (Slovak). Small closed set — most forms
+# are domestic. One canonical form per line; '#' and blanks ignored.
+Slovenská republika
+Slovensko
+Česká republika
+Česko
+Maďarsko
+Poľsko
+Rakúsko
+Nemecko
+Ukrajina
+Rumunsko
+Spojené kráľovstvo
+Írsko
+Taliansko
+Francúzsko
+Holandsko
+Belgicko
+Švajčiarsko
+Chorvátsko

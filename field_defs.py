@@ -339,6 +339,12 @@ DIGIT_COMB_FIELDS = set(DIGIT_COMB_CELLS.keys())     # datum/rok/psc/supisne/DI�
 FUZZY_TEXT_FIELDS = set(TEXT_COMB_CELLS.keys())      # titul/ulica/obec/stat + employer text
 CHECKBOX_FIELDS   = set(CHECKBOX_BOXES.keys())       # oprava/danovnik_obmedzena (occupancy)
 
+# Closed-set text fields whose noisy OCR is snapped to a known reference list
+# (gazetteer tier). Deterministic + auditable: cannot invent a value, flags on
+# miss. NOT personal names (meno/priezvisko/dieta*_meno/vypracoval) — those are
+# open-vocabulary and stay confidence-flag-only.
+GAZETTEER_FIELDS  = {"titul", "obec", "stat", "zam_titul", "zam_obec", "zam_stat"}
+
 # Slovak alphabet (lower+upper, with diacritics). Forms are filled in paličkové
 # písmo (block capitals); text-field OCR output is constrained to this set so
 # digit/punctuation noise is dropped (ICR "allowed character set" best practice).

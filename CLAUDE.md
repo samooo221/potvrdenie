@@ -54,11 +54,26 @@ non-erroring shift, not a crash.)
    bounding box. The layout is fixed, so per-field crops beat whole-page OCR.
 3. Recognize per field: digit OCR on numeric riadky, cell-occupancy detection on
    the 1–12 month grids, text OCR only on the few name/address boxes.
-4. Structure: send the raw field values + labels to local llama-server, which
-   emits JSON constrained by a GBNF grammar. (Will live in `extract_potvrdenie.py` — not yet written.)
-5. Validate: re-derive form arithmetic (e.g. riadok_03 == riadok_01 − riadok_02),
-   rodné číslo format + mod-11. Flag failures for human review.
-6. Thin FastAPI review UI: scan → extracted JSON → validation flags, side by side.
+4. Structure: **deterministic, not an LLM.** `build_extracted` (crop_ocr.py)
+   normalizes the recognized per-field values into the final JSON. The
+   architecture target shifted (see NEXT_PHASE.md): **AI lives in perception;
+   structuring + all maths are deterministic.** The LLM structuring lane and
+   `extract_potvrdenie.py` are deliberately NOT built — deterministic structuring
+   of a fixed comb-boxed form is more correct and more auditable. The ONE scoped
+   LLM role that remains planned is a Phase-6 text second-check tier (escalated
+   free-text fields only, suggestion-only on names, local model) — still deferred.
+5. Confidence + validate + escalate (the robustness core, built): every field
+   carries a PaddleOCR-derived confidence (`ocr_crop` returns `(text, score)`,
+   aggregated min-across-cells). `validate_extracted` re-derives form arithmetic
+   (riadok_03 == riadok_01 − riadok_02), rodné-číslo mod-11, datum⇄RČ, page1⇄page2
+   on the EXTRACTED values (not ground truth). `escalate` flags a field when
+   confidence < class threshold OR it fails a constraint. `disambiguate_extracted`
+   may fix a digit field only by varying its LOW-confidence cells to satisfy a
+   constraint — a high-confidence value that violates a constraint is FLAGGED,
+   never silently corrected. Closed-set text fields (štát/titul/obec) snap to a
+   bundled register via `gazetteer.py` (cannot invent a value; flags on miss).
+6. Thin FastAPI review UI (server.py): scan → extracted JSON → per-field
+   confidence badge + flag reason + validation panel, side by side.
 
 ## Conventions / paths
 - **Setup:** `bash bootstrap.sh` creates the venv, builds llama.cpp with Vulkan, and
@@ -88,10 +103,22 @@ non-erroring shift, not a crash.)
   after any card change.
 
 ## Implementation status
-Only `bootstrap.sh` and `CLAUDE.md` currently exist in the repo. The following are
-**not yet written**: `extract_potvrdenie.py`, the FastAPI review UI, the OCR pipeline,
-the validation logic, GBNF grammars, and synthetic test form images. When starting
-implementation, write these from scratch — don't assume any source file exists.
+**Built** (see STATUS.md for the honest detail): `crop_ocr.py` (OCR pipeline +
+confidence capture + validate/escalate/disambiguate + gazetteer routing),
+`field_defs.py` (per-field geometry + type sets + `GAZETTEER_FIELDS`),
+`gazetteer.py` + `data/{stat,titul,obce}.txt` (closed-set snap, obce pluggable),
+`server.py` (FastAPI review UI with per-field confidence badges + flag reasons),
+`eval_handwriting.py` (real per-field accuracy + mean confidence harness),
+`generate_samples.py` / `make_handwritten.py` (synthetic data), `align_photo.py`.
+Current: 98.4% on the synthetic printed-font set (1143/1162), ~5.8 fields/form
+flagged, confidence reliably catches the genuine misreads.
+
+**Deliberately NOT built** (architecture diverged — this is correct, not missing):
+`extract_potvrdenie.py` / LLM structuring / GBNF as a required stage. **Deferred:**
+the Phase-6 scoped text-second-check LLM tier (needs a local model), Phase-5 ICR,
+and the two-GPU Vulkan rack. Validate on REAL pen-filled forms (eval_handwriting.py)
+before building any of those — current accuracy is "plumbing works," not "reads
+real handwriting." The next-phase plan lives in `NEXT PHASE.md`.
 
 ## Definition of done (demo)
 A box that boots, processes a synthetic scanned form end-to-end, shows the JSON
