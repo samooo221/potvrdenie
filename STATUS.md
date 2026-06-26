@@ -3,9 +3,29 @@
 This is the honest state of the code, not the plan. Read it before trusting any number.
 
 **One-line truth:** A deterministic OCR + rules pipeline for both pages of the POT395 form,
-reaching ~99% on **synthetic samples it generates itself in a printed font**. The LLM-structuring
-half of the intended architecture does not exist, and the system has never been meaningfully
-tested on real handwriting.
+reaching ~98.5% on **synthetic samples it generates itself in a printed font**. The robustness
+core (confidence, validation, escalation, gazetteer, scoped LLM second-check) is built; the
+system has **never been tested on real handwriting** — that is the one thing that matters next.
+
+---
+
+## 0. Phase status (vs `NEXT PHASE.md`) — what's done and what is NOT
+
+| Phase | Status | Note |
+|---|---|---|
+| **1 — Confidence capture** | ✅ DONE | every field carries a PaddleOCR confidence (min across cells) |
+| **2 — Validate the extraction + escalation** | ✅ DONE | runs on OCR output (not ground truth); flags low-confidence / constraint-failing fields |
+| **3 — Constraint-guided disambiguation** | 🟡 PARTIAL | rodné-číslo mod-11 repair done; cross-field arithmetic search NOT implemented |
+| **Gazetteer tier** (closed-set text) | ✅ DONE | štát/titul/obec snap to a register; `obce.txt` is a 30-name seed, pluggable to the full ~2,900 |
+| **6 — Scoped LLM text second-check** | ✅ DONE + activated | code + `serve_llm.sh` + tested live on a tiny model; safe even with a weak model |
+| **4 — Real-handwriting evaluation** | ❌ NOT STARTED | `eval_handwriting.py` harness is built, but **no real pen-filled forms have been collected** — so there are still ZERO real-handwriting numbers |
+| **5 — ICR (handwriting recognition)** | ❌ NOT STARTED | deliberately gated on Phase 4's numbers — don't build until they prove which fields need it |
+| Two-GPU Vulkan rack / GPU OCR | ❌ NOT STARTED | deployment optimization; the dev box is one laptop, OCR runs on CPU |
+| DP-reconciliation demo feature | ❌ NOT STARTED | deferred differentiator |
+
+**The single most important gap: Phase 4.** Every accuracy number in this doc is against a printed
+font the code drew itself. Until real pen-filled forms are photographed and graded, "98.5%" means
+"the plumbing works," NOT "it reads real handwriting."
 
 ---
 

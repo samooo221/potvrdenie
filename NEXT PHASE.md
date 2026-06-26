@@ -57,6 +57,13 @@ current accuracy figure as "plumbing OK," full stop.
 
 ## Phased plan (in priority order)
 
+> **STATUS (2026-06-26):** Phases 1, 2, the gazetteer tier, and Phase 6 are **DONE**
+> (Phase 6 is built AND activated/tested live on a tiny local model). Phase 3 is
+> **PARTIAL** (rodné-číslo mod-11 only). Phases **4 (real-handwriting eval) and 5
+> (ICR) are NOT STARTED** — Phase 4 is the top priority and is blocked only on
+> collecting real pen-filled forms. See the table in `STATUS.md` §0 for the
+> authoritative status.
+
 ### Phase 1 — Confidence capture (keystone)
 - Change `ocr_crop`/`ocr_text_crop` to return `(text, score)`.
 - Propagate per-cell scores through `_ocr_income_field`, `_ocr_rc_field`,
