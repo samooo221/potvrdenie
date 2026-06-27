@@ -20,7 +20,8 @@ Synthetic-data-only still applies: label fabricated forms, never a real taxpayer
 
 Usage:
     python eval_handwriting.py <dir>
-    python eval_handwriting.py samples/    # works on the synthetic set too
+    python eval_handwriting.py samples/             # works on the synthetic set too
+    python eval_handwriting.py --make-template <dir-or-file>   # write a blank labels file
 """
 import json
 import sys
@@ -35,6 +36,12 @@ from crop_ocr import (
     normalize_to_canvas, disambiguate_extracted, validate_extracted, escalate,
 )
 from field_defs import FIELD_BOXES_P1, FIELD_BOXES_P2, CANVAS_W, CANVAS_H
+
+# Every labelable field, page-1 then page-2, in form order. The keys a labels
+# file is allowed to use; anything else is a typo that would otherwise vanish
+# silently (the eval loop only compares fields it recognizes).
+ALL_FIELDS = list(FIELD_BOXES_P1) + list(FIELD_BOXES_P2)
+KNOWN_FIELDS = set(ALL_FIELDS)
 
 
 def _prepare(path: Path, page: int) -> Image.Image:
@@ -81,6 +88,12 @@ def evaluate(directory: Path) -> None:
             print(f"  [skip] {p1.name}: no labels file")
             continue
         labels = _load_labels(labels_path)
+        unknown = [k for k in labels if k not in KNOWN_FIELDS]
+        msg = f"  [{stem}] labeled {len(labels)} fields"
+        if unknown:
+            shown = ", ".join(unknown[:8]) + ("…" if len(unknown) > 8 else "")
+            msg += f"  — WARNING: {len(unknown)} unknown key(s) ignored: {shown}"
+        print(msg)
         p2 = p1.with_name(f"{stem}_p2.png")
 
         img_p1 = _prepare(p1, 1)
@@ -140,14 +153,33 @@ def evaluate(directory: Path) -> None:
     print(f"{'='*78}")
 
 
+def make_template(dest: Path) -> None:
+    """Write a blank labels file pre-listing every field key, so you fill in
+    truth instead of remembering names. dest may be a directory (writes
+    template.labels.json inside it) or an explicit .json path."""
+    if dest.is_dir() or dest.suffix != ".json":
+        dest = dest / "template.labels.json" if dest.is_dir() else dest.with_suffix(".json")
+    template = {field: "" for field in ALL_FIELDS}
+    dest.write_text(json.dumps(template, ensure_ascii=False, indent=2) + "\n")
+    print(f"Wrote {dest} with {len(template)} field keys "
+          f"({len(FIELD_BOXES_P1)} page-1 + {len(FIELD_BOXES_P2)} page-2).")
+    print("Fill in the true values (leave a field blank to skip it), then run "
+          "the eval on its directory.")
+
+
 def main() -> None:
-    if len(sys.argv) != 2:
+    args = sys.argv[1:]
+    if len(args) == 2 and args[0] == "--make-template":
+        make_template(Path(args[1]))
+        return
+    if len(args) != 1:
         print(f"Usage: {sys.argv[0]} <dir-of-forms>")
+        print(f"       {sys.argv[0]} --make-template <dir-or-file>")
         sys.exit(1)
     print("Initializing OCR models …")
     from crop_ocr import get_rec_model
     get_rec_model()
-    evaluate(Path(sys.argv[1]))
+    evaluate(Path(args[0]))
 
 
 if __name__ == "__main__":
