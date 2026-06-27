@@ -1,0 +1,20 @@
+Block-print ("paličkové"-style) hand fonts used by render_hand.py to render the
+synthetic POT395 samples. All are free/open (SIL Open Font License) from the
+Google Fonts repository. NOT cursive — paličkové písmo is disconnected block caps.
+
+Re-fetch (from repo root) if this directory is lost:
+
+  BASE=https://raw.githubusercontent.com/google/fonts/main/ofl
+  curl -sSL -o fonts/PatrickHand-Regular.ttf        $BASE/patrickhand/PatrickHand-Regular.ttf
+  curl -sSL -o fonts/ArchitectsDaughter-Regular.ttf $BASE/architectsdaughter/ArchitectsDaughter-Regular.ttf
+  curl -sSL -o fonts/ShadowsIntoLight-Regular.ttf   $BASE/shadowsintolight/ShadowsIntoLight.ttf
+  curl -sSL -o fonts/GochiHand-Regular.ttf          $BASE/gochihand/GochiHand-Regular.ttf
+  curl -sSL -o fonts/Kalam-Regular.ttf              $BASE/kalam/Kalam-Regular.ttf
+
+Slovak uppercase-diacritic coverage (paličkové text is uppercased):
+  Kalam, PatrickHand, ArchitectsDaughter, ShadowsIntoLight  — full (Á Č Ď É Í Ľ Ň Ô Š Ť Ž)
+  GochiHand                                                  — lacks Č Ď Ľ Ň Ť (per-glyph
+                                                               fallback to LiberationSans covers them)
+
+If this directory is empty/absent, render_hand.build_profiles() degrades gracefully
+to an offline jitter pipeline on a monospace face (still real diacritics, less realistic).

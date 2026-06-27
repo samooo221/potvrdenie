@@ -111,9 +111,16 @@ structuring) running concurrently. **Neither lane exists as designed** (see §6)
 - FastAPI review UI (`server.py`) — both pages, all field sections, validation panel.
 
 **Mocked / simulated / not what it looks like:**
-- **"Handwriting" is a printed monospace font** (Liberation Mono) with rotation, blur, and
-  salt-pepper noise (`make_handwritten.py`, `generate_samples.add_scan_noise`). It is **not**
-  real handwriting. Every accuracy number below is against this.
+- **"Handwriting" is SIMULATED block-print, not real pen.** The 20-sample set now renders in
+  downloaded hand-print (paličkové) fonts — Patrick Hand, Kalam, Architects Daughter, Shadows
+  Into Light, Gochi Hand — with per-glyph rotation, pen-pressure ink bands (incl. a lighter band
+  modelling blue ink, since the pipeline is grayscale), ink bleed, baseline wander, and paper/scan
+  texture (`render_hand.py`, shared by `generate_samples.py` + `make_handwritten.py`), plus 5
+  typewriter/printer samples (the other legally-accepted POT395 fill mode). A per-glyph fallback
+  to LiberationSans guarantees Slovak diacritics á č ď é í ľ ň ô š ť ž always render. This is a far
+  better visual proxy and a much stronger validation stress-test than the old printed monospace —
+  but it is still self-rendered on the exact `field_defs` coordinates, so it is **not** real
+  handwriting and does not close Phase 4. Every accuracy number below is against this.
 - **Ground truth is self-generated.** The pipeline is graded against data the generator drew —
   draw and read share the same coordinates, so geometry errors can hide.
 - **No GPU OCR.** `paddlepaddle` is the CPU build; the present RTX 5060 is unused by OCR.
@@ -124,11 +131,23 @@ structuring) running concurrently. **Neither lane exists as designed** (see §6)
 
 ---
 
-## 4. Accuracy numbers (all on synthetic, printed-font samples)
+## 4. Accuracy numbers (all on synthetic samples)
+
+**Current set — 20 SIMULATED-handwriting samples (`render_hand.py` block-print fonts), 2026-06-27:**
 
 | Scope | Result | Notes |
 |---|---|---|
-| Both pages, 8 samples, 129 fields each | **99.1% (1023/1032)** | current headline |
+| Both pages, 20 samples, 130 fields each | **94.3% (2453/2600)** | new headline — honestly lower than the printed-font run; hand-print fonts are harder |
+| Hardest fields: rodné čísla, datum_narodenia, income decimals | **60–75%** | confidence tracks it (low mean conf, high flagged) → these are the ICR candidates Phase 4/5 must target |
+| Month grids / checkboxes / occupancy | ~**100%** | occupancy detection robust to the messier strokes |
+| Gazetteer text (titul/obec/stat + employer) | **95–100%** | snap-to-register holds; misses (KANADA/ZÁRIEČIE/DBA) correctly flagged |
+| All 7 constraint breaks + 2 gazetteer-miss | **flagged 9/9** | arithmetic, mod-11, datum↔RČ, page1↔page2 RČ, PSČ, DIČ, rok, gazetteer — verified in the production path |
+
+**Earlier set — 8 printed-monospace samples (superseded):**
+
+| Scope | Result | Notes |
+|---|---|---|
+| Both pages, 8 samples, 129 fields each | **99.1% (1023/1032)** | old headline (printed font) |
 | Page 1 only (38 fields) | 98.0% | after uppercase + Slovak-alpha filter |
 | Fully-filled sample (`--full`, 130 fields) | 97.7% (127/130) | |
 | rodné číslo | 0% → **100%** | was cropping declaration text; fixed by relocating + per-cell + programmatic "/" |

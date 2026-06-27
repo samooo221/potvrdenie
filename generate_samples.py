@@ -1,72 +1,120 @@
 #!/usr/bin/env python3
-"""
-generate_samples.py — synthetic POT395 form sample generator (real form template).
+"""generate_samples.py — synthetic POT395 form sample generator (real form template).
+
+Produces a SPEC-DRIVEN set of samples that (a) render as realistic paličkové písmo
+(hand-printed block capitals — the way POT395 is filled by hand) plus a few
+typewriter/printer samples, and (b) collectively exercise every deterministic
+validation / escalation code path. Rendering realism lives in render_hand.py.
 
 Usage:
-    python generate_samples.py --n 8 --out samples/ --break-frac 0.25
+    python generate_samples.py --out samples/ --seed 42        # all 20 specs
+    python generate_samples.py --out samples/ --n 5            # first 5 specs
+    python generate_samples.py --full                          # legacy: one full sample
 
-Produces per sample:
-    samples/sample_NNNN_p1.png  — page 1 (real blank form + synthetic handwriting)
-    samples/sample_NNNN_p2.png  — page 2 (real blank form + month checkmarks)
-    samples/sample_NNNN.json    — ground truth + field box coordinates
+Per sample:
+    samples/sample_NNNN_p1.png  — page 1 (blank form + synthetic fill)
+    samples/sample_NNNN_p2.png  — page 2
+    samples/sample_NNNN.json    — ground truth + field boxes + break/gazetteer markers
+
+HONESTY: these are SIMULATED block letters. They are a far better visual proxy and
+a much stronger validation stress-test than a printed monospace, but they do NOT
+satisfy Phase 4's real intent — an honest accuracy number on REAL pen-on-paper
+forms. A self-rendered image still shares the generator's stroke idea and sits on
+the exact field_defs coordinates, so it cannot reveal the recognizer's true failure
+modes on genuine handwriting. Real-handwriting validation stays open (label real
+forms via eval_handwriting.py's <stem>.labels.json path).
 
 Synthetic data only. Never use real taxpayer data.
 """
 import argparse
 import json
-import math
 import random
 import re
 from decimal import Decimal, ROUND_DOWN
 from pathlib import Path
 
-import numpy as np
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from PIL import Image
 
+import render_hand as rh
+from gazetteer import _norm as _gznorm, gazetteer_match
 from field_defs import (
     FIELD_BOXES_P1, FIELD_BOXES_P2,
-    INCOME_DIGIT_CELLS, _N_DECIMAL,
-    NUMERIC_FIELDS, MONTH_FIELDS, TEXT_FIELDS, RC_FIELDS,
+    INCOME_DIGIT_CELLS, NUMERIC_FIELDS, MONTH_FIELDS, RC_FIELDS,
     RC_CELLS, PRIEZVISKO_CELLS, MENO_CELLS,
     DIGIT_COMB_FIELDS, FUZZY_TEXT_FIELDS, CHECKBOX_FIELDS,
-    DIGIT_COMB_CELLS, TEXT_COMB_CELLS, CHECKBOX_BOXES,
+    DIGIT_COMB_CELLS, TEXT_COMB_CELLS,
 )
 
 TEMPLATE_P1 = Path(__file__).parent / "form_template_p1.png"
 TEMPLATE_P2 = Path(__file__).parent / "form_template_p2.png"
-
-FONT_CANDIDATES = [
-    "/usr/share/fonts/liberation-mono-fonts/LiberationMono-Regular.ttf",
-    "/usr/share/fonts/google-noto/NotoSansMono-Regular.ttf",
-    "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
-    "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-    "/usr/share/fonts/truetype/freefont/FreeMono.ttf",
-]
-
-FIRST_NAMES = ["Ján", "Mária", "Peter", "Anna", "Tomáš", "Zuzana",
-               "Martin", "Jana", "Michal", "Eva", "Ľubomír", "Katarína"]
-LAST_NAMES  = ["Novák", "Horváth", "Kováč", "Varga", "Szabó", "Tóth",
-               "Lukáč", "Blaho", "Šimko", "Krajčí", "Ďurica", "Žiak"]
-TITULY      = ["", "", "", "Ing", "Mgr", "JUDr", "Bc", "PhD"]
-ULICE       = ["Hlavná", "Štúrova", "Mierová", "Lipová", "Záhradná", "Školská",
-               "Nová", "Dlhá", "Krátka", "Slnečná", "Poľná", "Brezová"]
-OBCE        = ["Bratislava", "Košice", "Prešov", "Žilina", "Nitra", "Trnava",
-               "Martin", "Trenčín", "Poprad", "Levice", "Čadca", "Michalovce"]
+_DATA = Path(__file__).parent / "data"
 
 
-def make_address(rng: random.Random) -> dict:
-    """Synthetic Slovak address — diacritic-rich to exercise the Latin model."""
-    return {
-        "titul": rng.choice(TITULY),
-        "ulica": rng.choice(ULICE),
-        "supisne_cislo": str(rng.randint(1, 4999)),
-        "psc": f"{rng.randint(10,99)}{rng.randint(0,9)}{rng.randint(10,99)}",  # 5 digits
-        "obec": rng.choice(OBCE),
-        "stat": "Slovensko",      # fits the 10-cell Štát comb
-    }
+# ---------------------------------------------------------------------------
+# Synthetic data pools (100% fabricated)
+# ---------------------------------------------------------------------------
+# Three diacritic-density tiers so samples span the easy → hard recognition range.
+FIRST_NAMES_PLAIN = ["JAN", "PETER", "MARTIN", "TOMAS", "MICHAL", "MAREK", "LUKAS", "JOZEF"]
+LAST_NAMES_PLAIN  = ["NOVAK", "HORAK", "BLAHO", "SOKOL", "POLAK", "URBAN", "MRAZ", "SIMON"]
+
+FIRST_NAMES_LIGHT = ["JÁN", "MÁRIA", "PETER", "ANNA", "TOMÁŠ", "ZUZANA", "EVA", "JANA"]
+LAST_NAMES_LIGHT  = ["NOVÁK", "HORVÁTH", "KOVÁČ", "VARGA", "TÓTH", "LUKÁČ", "ŠIMKO", "ŽIAK"]
+
+FIRST_NAMES_HEAVY = ["ĽUBOMÍR", "ŽOFIA", "ONDREJ", "SOŇA", "ĽUDOVÍT", "BOHDANA", "MÚČKA", "ŠTEFÁNIA"]
+LAST_NAMES_HEAVY  = ["ĎURČOVIČ", "ĽUPTÁK", "HRÍBKOVÁ", "ŤAPÁK", "ŽIŠKO", "ŠŤASTNÝ", "NÔTOVÁ", "ČAČKO"]
+
+ULICE = ["HLAVNÁ", "ŠTÚROVA", "MIEROVÁ", "LIPOVÁ", "ZÁHRADNÁ", "ŠKOLSKÁ",
+         "NOVÁ", "DLHÁ", "KRÁTKA", "SLNEČNÁ", "POĽNÁ", "BREZOVÁ"]
+
+FIRMY = ["TECHNOSK", "ALFA STAV", "MONTÁŽE PLUS", "DREVOVÝROBA",
+         "KOVOSLUŽBA", "GASTRO CENTRUM", "LOGISTIKA SK", "ELEKTRO MORAVA"]
 
 
+def _load_register(fname: str) -> list[str]:
+    p = _DATA / fname
+    out = []
+    if p.exists():
+        for line in p.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                out.append(line)
+    return out
+
+
+# Valid (in-register) closed-set values so a "valid" sample truly snaps to the
+# gazetteer. Filtered to what fits the form's comb cells (obec 19, štát 10, titul 4).
+OBCE_REG = [o.upper() for o in _load_register("obce.txt")
+            if len(o.replace(" ", "")) <= 18] or ["BRATISLAVA"]
+VALID_TITUL = sorted({_gznorm(t).upper() for t in _load_register("titul.txt")
+                      if 0 < len(_gznorm(t)) <= 4}) or ["ING", "MGR", "BC"]
+
+# Out-of-register values for gazetteer-MISS samples. Filtered at load time to
+# entries that fit the comb cells AND genuinely do NOT snap to the register — Slovak
+# country names cluster on the "-sko" suffix, so a naive pick (FÍNSKO→Írsko,
+# NÓRSKO→Poľsko) silently matches. This guarantees a real miss → confidence-flag.
+def _miss_pool(field: str, candidates: list[str], max_len: int) -> list[str]:
+    out = [c for c in candidates
+           if len(c.replace(" ", "")) <= max_len and not gazetteer_match(field, c)["matched"]]
+    if not out:
+        raise RuntimeError(f"no non-snapping miss values for {field}: {candidates}")
+    return out
+
+OBCE_MISS  = _miss_pool("obec", ["HÔRKA", "DRÁHOVCE", "STRÁŽKY", "BOHDANOVCE", "ZÁRIEČIE"], 18)
+STAT_MISS  = _miss_pool("stat", ["KANADA", "MEXIKO", "EGYPT", "BRAZÍLIA", "JAPONSKO", "TURECKO"], 10)
+TITUL_MISS = _miss_pool("titul", ["MBA", "DBA", "LLM"], 4)
+
+
+def _name_pools(style: str):
+    if style == "heavy":
+        return LAST_NAMES_HEAVY, FIRST_NAMES_HEAVY
+    if style == "light":
+        return LAST_NAMES_LIGHT, FIRST_NAMES_LIGHT
+    return LAST_NAMES_PLAIN, FIRST_NAMES_PLAIN
+
+
+# ---------------------------------------------------------------------------
+# Rodné číslo / numbers
+# ---------------------------------------------------------------------------
 def datum_from_rc(rc: str) -> str:
     """Date of birth (DDMMYYYY) derived from a rodné číslo 'YYMMDD/NNNC'."""
     yy, mm, dd = int(rc[0:2]), int(rc[2:4]) % 50, int(rc[4:6])
@@ -74,72 +122,17 @@ def datum_from_rc(rc: str) -> str:
     return f"{dd:02d}{mm:02d}{year:04d}"
 
 
-FIRMY = ["TECHNOSK", "ALFA STAV", "MONTÁŽE PLUS", "DREVOVÝROBA",
-         "KOVOSLUŽBA", "GASTRO CENTRUM", "LOGISTIKA SK", "ELEKTRO MORAVA"]
-
-
-def make_employer(rng: random.Random, full: bool = False) -> dict:
-    """Synthetic III. ODDIEL employer (a právnická osoba / company).
-
-    full=True also fills the fyzická-osoba name fields (not realistic — a real
-    form is one or the other — but useful for a complete test of every field).
-    """
-    addr = make_address(rng)
-    return {
-        "zam_dic": str(rng.randint(1000000000, 9999999999)),   # 10-digit DIČ
-        "zam_priezvisko": rng.choice(LAST_NAMES).upper() if full else "",
-        "zam_meno": rng.choice(FIRST_NAMES).upper() if full else "",
-        "zam_titul": "ING" if full else "",
-        "zam_obchodne_meno": (rng.choice(FIRMY) + " SRO").upper(),
-        "zam_ulica": addr["ulica"].upper(),
-        "zam_supisne_cislo": str(rng.randint(1, 4999)),
-        "zam_psc": f"{rng.randint(10,99)}{rng.randint(0,9)}{rng.randint(10,99)}",
-        "zam_obec": addr["obec"].upper(),
-        "zam_stat": "SLOVENSKO",
-        "vypracoval": (rng.choice(LAST_NAMES) + " " + rng.choice(FIRST_NAMES)).upper(),
-        "potvrdenie_datum": f"{rng.randint(1,28):02d}0125",      # DD.01.2025
-    }
-
-
-def make_page2_extras(rng: random.Random, full: bool = False) -> dict:
-    """Page-2 II. ODDIEL continuation income, month grids, child-bonus table."""
-    d = {
-        "p2_riadok_08a": str(make_numeric(rng, lo=0, hi=999)),
-        "p2_riadok_09":  str(make_numeric(rng, lo=0, hi=999)),
-        "p2_riadok_10":  str(make_numeric(rng, lo=0, hi=9999)),
-        "p2_riadok_11":  str(make_numeric(rng, lo=0, hi=9999)),
-        "p2_riadok_12":  str(make_numeric(rng, lo=0, hi=99999)),
-    }
-    # Month grids for riadok 10 & 13 (per-month booleans; master left blank).
-    for pref in ("r10", "r13"):
-        d[f"{pref}_mesiac_vsetky"] = False
-        for i in range(1, 13):
-            d[f"{pref}_mesiac_{i:02d}"] = True if full else rng.random() < 0.5
-    # Child tax-bonus table: all 4 if full, else 1–3 filled.
-    n_children = 4 if full else rng.randint(1, 3)
-    for c in range(1, 5):
-        filled = c <= n_children
-        # short names so they fit the 11-cell box
-        d[f"dieta{c}_meno"] = (rng.choice(LAST_NAMES)[:5].upper() if filled else "")
-        d[f"dieta{c}_rod_cislo"] = make_valid_rc(rng) if filled else ""
-        d[f"dieta{c}_mesiac_vsetky"] = False
-        for i in range(1, 13):
-            d[f"dieta{c}_mesiac_{i:02d}"] = filled and (True if full else rng.random() < 0.6)
-    return d
-
-
-def find_font(size: int) -> ImageFont.ImageFont:
-    for path in FONT_CANDIDATES:
-        if Path(path).exists():
-            return ImageFont.truetype(path, size)
-    return ImageFont.load_default()
-
-
-def make_valid_rc(rng: random.Random) -> str:
+def make_valid_rc(rng: random.Random, sex: str | None = None) -> str:
+    """Valid rodné číslo. sex='F' forces the +50 month encoding, 'M' forbids it."""
     yy = rng.randint(50, 99)
     mm = rng.randint(1, 12)
     dd = rng.randint(1, 28)
-    mm_enc = mm + 50 if rng.random() < 0.5 else mm
+    if sex == "F":
+        mm_enc = mm + 50
+    elif sex == "M":
+        mm_enc = mm
+    else:
+        mm_enc = mm + 50 if rng.random() < 0.5 else mm
     while True:
         nnn = rng.randint(1, 999)
         nine = int(f"{yy:02d}{mm_enc:02d}{dd:02d}{nnn:03d}")
@@ -149,159 +142,248 @@ def make_valid_rc(rng: random.Random) -> str:
     return f"{yy:02d}{mm_enc:02d}{dd:02d}/{nnn:03d}{c}"
 
 
-def make_invalid_rc(rng: random.Random) -> str:
-    valid = make_valid_rc(rng)
+def make_invalid_rc(rng: random.Random, sex: str | None = None) -> str:
+    """Valid format, wrong mod-11 check digit (isolates the mod-11 constraint)."""
+    valid = make_valid_rc(rng, sex)
     body, check = valid[:-1], int(valid[-1])
     bad = (check + rng.randint(1, 9)) % 10
     return body + str(bad)
 
 
 def make_numeric(rng: random.Random, lo: int = 1000, hi: int = 99999) -> Decimal:
-    whole = rng.randint(lo, hi)
-    cents = rng.randint(0, 99)
-    return Decimal(f"{whole}.{cents:02d}")
+    return Decimal(f"{rng.randint(lo, hi)}.{rng.randint(0, 99):02d}")
 
 
-def make_ground_truth(rng: random.Random, break_type: str | None,
-                      full: bool = False) -> tuple[dict, list[str]]:
-    # r01 = r01a + r01b  (total income = main + small exempt supplement)
-    r01a = make_numeric(rng, lo=5000, hi=80000)
-    r01b_whole = rng.randint(0, 3000)
-    r01b = Decimal(f"{r01b_whole}.{rng.randint(0, 99):02d}")
-    r01  = r01a + r01b
+def _make_psc(rng: random.Random, n: int = 5) -> str:
+    return str(rng.randint(1, 9)) + "".join(str(rng.randint(0, 9)) for _ in range(n - 1))
 
-    # r02 = r02a + r02b  (total mandatory contributions)
-    # Employee mandatory contributions: ~13.4% of r01a (health 4% + social 9.4%)
+
+def _make_dic(rng: random.Random, n: int = 10) -> str:
+    return str(rng.randint(1, 9)) + "".join(str(rng.randint(0, 9)) for _ in range(n - 1))
+
+
+# ---------------------------------------------------------------------------
+# Income rows (honour the per-sample income profile; keep r01=r01a+r01b etc.)
+# ---------------------------------------------------------------------------
+def _compute_income(rng: random.Random, profile: str) -> dict:
+    if profile == "large":
+        r01a = make_numeric(rng, lo=1_000_000, hi=40_000_000)   # fills 7-8 integer cells
+        r01b = Decimal(f"{rng.randint(0, 9999)}.{rng.randint(0, 99):02d}")
+    elif profile == "small":
+        r01a = make_numeric(rng, lo=100, hi=999)
+        r01b = Decimal(f"{rng.randint(0, 99)}.{rng.randint(0, 99):02d}")
+    else:                                                        # typical / zero / mix
+        r01a = make_numeric(rng, lo=5000, hi=80000)
+        r01b = Decimal(f"{rng.randint(0, 3000)}.{rng.randint(0, 99):02d}")
+
+    if profile == "zero":
+        r01b = Decimal("0.00")
+
+    r01 = r01a + r01b
     r02a = (r01a * Decimal("0.134")).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
     r02b = Decimal("0.00")
-    r02  = r02a + r02b
-
-    r03_correct = r01 - r02   # taxable base
-
-    # r04–r09: plausible but not cross-validated against each other in this MVP
-    r04 = (r03_correct * Decimal("0.19")).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+    r02 = r02a + r02b
+    r03 = r01 - r02
+    r04 = (r03 * Decimal("0.19")).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
     r05 = Decimal("0.00")
-    # riadok_06/08/08a/09 have only 3 integer cells (max 999.99)
-    # riadok_07 has 4 integer cells (max 9999.99)
-    r06  = make_numeric(rng, lo=0, hi=999)
-    r07  = Decimal("0.00")
-    r08  = make_numeric(rng, lo=0, hi=999)
-    r08a = Decimal("0.00")
-    r09  = make_numeric(rng, lo=0, hi=999)
 
-    broken_fields = []
+    if profile == "zero":
+        r06 = r07 = r08 = r08a = r09 = Decimal("0.00")
+    else:
+        # riadok_06/08/08a/09 have only 3 integer cells (≤999.99); 07 has 4 (≤9999.99)
+        r06 = make_numeric(rng, lo=0, hi=999)
+        r07 = Decimal("0.00")
+        r08 = make_numeric(rng, lo=0, hi=999)
+        r08a = Decimal("0.00")
+        r09 = make_numeric(rng, lo=0, hi=999)
 
-    if break_type in ("arithmetic", "both"):
+    return dict(r01=r01, r01a=r01a, r01b=r01b, r02=r02, r02a=r02a, r02b=r02b,
+                r03=r03, r04=r04, r05=r05, r06=r06, r07=r07, r08=r08, r08a=r08a, r09=r09)
+
+
+# ---------------------------------------------------------------------------
+# Employer (III. ODDIEL) + page-2 continuation (II. ODDIEL) + child bonus table
+# ---------------------------------------------------------------------------
+def _make_employer(rng: random.Random, kind: str, names_style: str,
+                   full: bool = False, bad_dic: bool = False) -> dict:
+    sur, giv = _name_pools(names_style)
+    is_company = (kind == "company")
+    return {
+        "zam_dic": _make_dic(rng, n=9 if bad_dic else 10),
+        "zam_priezvisko": (rng.choice(sur) if (not is_company or full) else ""),
+        "zam_meno":       (rng.choice(giv) if (not is_company or full) else ""),
+        "zam_titul":      ("ING" if (not is_company or full) else ""),
+        "zam_obchodne_meno": ((rng.choice(FIRMY) + " SRO") if (is_company or full) else ""),
+        "zam_ulica": rng.choice(ULICE),
+        "zam_supisne_cislo": str(rng.randint(1, 4999)),
+        "zam_psc": _make_psc(rng),
+        "zam_obec": rng.choice(OBCE_REG),
+        "zam_stat": "SLOVENSKO",
+        "vypracoval": rng.choice(sur) + " " + rng.choice(giv),
+        "potvrdenie_datum": f"{rng.randint(1, 28):02d}0125",     # DD.01.2025
+    }
+
+
+def _month_pattern(rng: random.Random, mode: str):
+    if mode == "master":
+        return True, [False] * 12
+    if mode == "all":
+        return False, [True] * 12
+    if mode == "none":
+        return False, [False] * 12
+    return False, [rng.random() < 0.5 for _ in range(12)]         # partial
+
+
+def _make_page2_extras(rng: random.Random, spec: dict) -> dict:
+    profile = spec["income"]
+    d = {
+        "p2_riadok_08a": str(make_numeric(rng, lo=0, hi=999)),
+        "p2_riadok_09":  str(make_numeric(rng, lo=0, hi=999)),
+        "p2_riadok_10":  str(make_numeric(rng, lo=0, hi=9999)),
+        "p2_riadok_11":  str(make_numeric(rng, lo=0, hi=9999)),
+        "p2_riadok_12":  str(make_numeric(rng, lo=1_000_000, hi=90_000_000)
+                             if profile in ("large", "mix") else make_numeric(rng, lo=0, hi=99999)),
+    }
+    for pref in ("r10", "r13"):
+        vsetky, months = _month_pattern(rng, spec["months"])
+        d[f"{pref}_mesiac_vsetky"] = vsetky
+        for i in range(1, 13):
+            d[f"{pref}_mesiac_{i:02d}"] = months[i - 1]
+
+    sur, _giv = _name_pools(spec["names"])
+    n_children = spec["children"]
+    for c in range(1, 5):
+        filled = c <= n_children
+        d[f"dieta{c}_meno"] = (rng.choice(sur)[:9] if filled else "")
+        d[f"dieta{c}_rod_cislo"] = make_valid_rc(rng) if filled else ""
+        d[f"dieta{c}_mesiac_vsetky"] = False
+        for i in range(1, 13):
+            d[f"dieta{c}_mesiac_{i:02d}"] = filled and (
+                True if spec["months"] == "all" else rng.random() < 0.6)
+    return d
+
+
+# ---------------------------------------------------------------------------
+# Ground truth (spec-driven)
+# ---------------------------------------------------------------------------
+def make_ground_truth(rng: random.Random, spec: dict) -> tuple[dict, list[str], list[str]]:
+    sex = spec["sex"]
+    brk = spec.get("brk")
+    gaz = spec.get("gaz", [])
+    full = spec.get("full", False)
+    empty_opt = spec.get("empty_optionals", False)
+
+    broken_fields: list[str] = []
+    gaz_miss: list[str] = []
+
+    inc = _compute_income(rng, spec["income"])
+
+    # --- rodné číslo (employee) ---
+    if brk == "mod11":
+        rc = make_invalid_rc(rng, sex)
+        broken_fields.append("rod_cislo")
+    else:
+        rc = make_valid_rc(rng, sex)
+
+    # --- page-2 top rodné číslo (page matching) ---
+    if brk == "p2_rc":
+        rc_p2 = make_valid_rc(rng, sex)
+        while rc_p2 == rc:
+            rc_p2 = make_valid_rc(rng, sex)
+        broken_fields.append("rod_cislo_p2")
+    else:
+        rc_p2 = rc
+
+    # --- dátum narodenia (cross-check with rod_cislo) ---
+    if brk == "datum":
+        datum = datum_from_rc(make_valid_rc(rng, sex))       # unrelated DOB
+        broken_fields.append("datum_narodenia")
+    else:
+        datum = datum_from_rc(rc if re.fullmatch(r"\d{6}/\d{4}", rc) else make_valid_rc(rng, sex))
+
+    # --- taxable-base arithmetic (r01 − r02 == r03) ---
+    if brk == "arithmetic":
         r03 = make_numeric(rng)
-        while r03 == r03_correct:
+        while r03 == inc["r03"]:
             r03 = make_numeric(rng)
         broken_fields.append("riadok_03")
     else:
-        r03 = r03_correct
+        r03 = inc["r03"]
 
-    if break_type in ("rod_cislo", "both"):
-        rc = make_invalid_rc(rng)
-        broken_fields.append("rod_cislo")
+    # --- assessment year range ---
+    if brk == "rok_range":
+        rok = "5"                                            # malformed (len≠2) → out of range
+        broken_fields.append("rok")
     else:
-        rc = make_valid_rc(rng)
+        rok = "25"
 
-    name = rng.choice(LAST_NAMES) + " " + rng.choice(FIRST_NAMES)
-
-    addr = make_address(rng)
-
-    # Dátum narodenia derived from rodné číslo so the cross-check passes for
-    # valid samples. The "datum" break mode desyncs it to exercise the check.
-    if break_type == "datum":
-        datum = datum_from_rc(make_valid_rc(rng))  # unrelated DOB
-        broken_fields.append("datum_narodenia")
+    # --- PSČ length ---
+    if brk == "psc_len":
+        psc = _make_psc(rng, n=4)
+        broken_fields.append("psc")
     else:
-        datum = datum_from_rc(rc if re.fullmatch(r"\d{6}/\d{4}", rc) else make_valid_rc(rng))
+        psc = _make_psc(rng, n=5)
 
-    # Text fields are UPPERCASE — real forms are filled in paličkové písmo
-    # (block capitals). Matching stays case-insensitive (compare_text_fuzzy).
+    # --- names + address text (closed sets, with optional gazetteer miss) ---
+    sur, giv = _name_pools(spec["names"])
+    name = rng.choice(sur) + " " + rng.choice(giv)
+
+    titul = "" if empty_opt else ("" if rng.random() < 0.3 else rng.choice(VALID_TITUL))
+    if "titul" in gaz:
+        titul = rng.choice(TITUL_MISS); gaz_miss.append("titul")
+    obec = rng.choice(OBCE_REG)
+    if "obec" in gaz:
+        obec = rng.choice(OBCE_MISS); gaz_miss.append("obec")
+    stat = "SLOVENSKO"
+    if "stat" in gaz:
+        stat = rng.choice(STAT_MISS); gaz_miss.append("stat")
+
+    emp = _make_employer(rng, spec["employer"], spec["names"], full=full,
+                         bad_dic=(brk == "dic_len"))
+    if brk == "dic_len":
+        broken_fields.append("zam_dic")
+    if empty_opt:
+        emp["vypracoval"] = ""
+
     gt = {
-        "meno_zamestnanca": name.upper(),
+        "meno_zamestnanca": name,
         "rod_cislo": rc,
-        "rod_cislo_p2": rc,          # page-2 top repeats the same rodné číslo
+        "rod_cislo_p2": rc_p2,
         "datum_narodenia": datum,
-        "rok": "25",                       # 2-digit suffix → assessment year 2025
-        "oprava": True if full else rng.random() < 0.15,
-        "titul": "ING" if full else addr["titul"].upper(),
-        "ulica": addr["ulica"].upper(),
-        "supisne_cislo": addr["supisne_cislo"],
-        "psc": addr["psc"],
-        "obec": addr["obec"].upper(),
-        "stat": addr["stat"].upper(),
-        "danovnik_obmedzena": True if full else rng.random() < 0.3,
-        **make_employer(rng, full),
-        "riadok_01":  str(r01),
-        "riadok_01a": str(r01a),
-        "riadok_01b": str(r01b),
-        "riadok_02":  str(r02),
-        "riadok_02a": str(r02a),
-        "riadok_02b": str(r02b),
+        "rok": rok,
+        "oprava": bool(spec["oprava"]),
+        "titul": titul,
+        "ulica": rng.choice(ULICE),
+        "supisne_cislo": "" if empty_opt else str(rng.randint(1, 4999)),
+        "psc": psc,
+        "obec": obec,
+        "stat": stat,
+        "danovnik_obmedzena": bool(spec["obmedz"]),
+        **emp,
+        "riadok_01":  str(inc["r01"]),
+        "riadok_01a": str(inc["r01a"]),
+        "riadok_01b": str(inc["r01b"]),
+        "riadok_02":  str(inc["r02"]),
+        "riadok_02a": str(inc["r02a"]),
+        "riadok_02b": str(inc["r02b"]),
         "riadok_03":  str(r03),
-        "riadok_04":  str(r04),
-        "riadok_05":  str(r05),
-        "riadok_06":  str(r06),
-        "riadok_07":  str(r07),
-        "riadok_08":  str(r08),
-        "riadok_08a": str(r08a),
-        "riadok_09":  str(r09),
-        **make_page2_extras(rng, full),
+        "riadok_04":  str(inc["r04"]),
+        "riadok_05":  str(inc["r05"]),
+        "riadok_06":  str(inc["r06"]),
+        "riadok_07":  str(inc["r07"]),
+        "riadok_08":  str(inc["r08"]),
+        "riadok_08a": str(inc["r08a"]),
+        "riadok_09":  str(inc["r09"]),
+        **_make_page2_extras(rng, spec),
     }
-    return gt, broken_fields
+    return gt, broken_fields, gaz_miss
 
 
-def _draw_char_in_cell(draw: ImageDraw.ImageDraw, ch: str,
-                       cell: list, font: ImageFont.ImageFont,
-                       rng: random.Random) -> None:
-    """Draw a single character centered inside a digit cell box."""
-    x1, y1, x2, y2 = cell
-    tw = draw.textlength(ch, font=font)
-    _, _, _, th = draw.textbbox((0, 0), ch, font=font)
-    base_x = x1 + (x2 - x1 - tw) / 2
-    base_y = y1 + (y2 - y1 - th) / 2
-    jx = rng.randint(-1, 1)
-    jy = rng.randint(-1, 1)
-    draw.text((base_x + jx, base_y + jy), ch, fill=0, font=font)
-
-
-def _draw_numeric_in_cells(draw: ImageDraw.ImageDraw, value_str: str,
-                            cells: list, font: ImageFont.ImageFont,
-                            rng: random.Random) -> None:
-    """Place each digit of value_str into its individual digit cell.
-
-    The last _N_DECIMAL cells receive the cents digits (after the decimal point).
-    Integer digits are right-aligned into the remaining cells.
-    """
-    n_dec = _N_DECIMAL
-    int_cells = cells[:-n_dec]
-    dec_cells = cells[-n_dec:]
-
-    if "." in value_str:
-        int_part, dec_part = value_str.split(".", 1)
-    else:
-        int_part, dec_part = value_str, "00"
-
-    dec_part = (dec_part + "00")[:n_dec]  # ensure exactly n_dec digits
-
-    # Right-align integer digits: fill from the rightmost integer cell backwards
-    int_digits = list(int_part)
-    for offset, cell in enumerate(reversed(int_cells)):
-        idx = len(int_digits) - 1 - offset
-        if idx >= 0:
-            _draw_char_in_cell(draw, int_digits[idx], cell, font, rng)
-
-    # Decimal digits go left-to-right in decimal cells
-    for ch, cell in zip(dec_part, dec_cells):
-        _draw_char_in_cell(draw, ch, cell, font, rng)
-
-
-def draw_values(img: Image.Image, draw: ImageDraw.ImageDraw,
-                gt: dict, field_boxes: dict, font: ImageFont.ImageFont,
-                rng: random.Random) -> None:
-    """Render synthetic handwritten values into the given field boxes."""
+# ---------------------------------------------------------------------------
+# Drawing — route each field class to the shared render_hand pipeline
+# ---------------------------------------------------------------------------
+def draw_values(img: Image.Image, gt: dict, field_boxes: dict,
+                profile: rh.WriterProfile, rng: random.Random) -> None:
     for key, box in field_boxes.items():
         val = gt.get(key)
         if val is None:
@@ -310,83 +392,49 @@ def draw_values(img: Image.Image, draw: ImageDraw.ImageDraw,
 
         if key in MONTH_FIELDS or key in CHECKBOX_FIELDS:
             if val:
-                jx = rng.randint(-2, 2)
-                jy = rng.randint(-2, 2)
-                draw.line([(x1+3+jx, y1+3+jy), (x2-3+jx, y2-3+jy)], fill=0, width=2)
-                draw.line([(x2-3+jx, y1+3+jy), (x1+3+jx, y2-3+jy)], fill=0, width=2)
+                rh.draw_cross(img, x1, y1, x2, y2, profile, rng)
         elif key in NUMERIC_FIELDS:
-            _draw_numeric_in_cells(draw, str(val), INCOME_DIGIT_CELLS[key], font, rng)
+            rh.draw_numeric(img, str(val), key, profile, rng)
         elif key in RC_FIELDS:
-            # rodné číslo (employee or child): 10 digits, one per cell; "/" pre-printed.
             digits = str(val).replace("/", "")
-            for ch, cell in zip(digits, RC_CELLS[key]):
-                _draw_char_in_cell(draw, ch, cell, font, rng)
+            rh.draw_chars_in_cells(img, digits, RC_CELLS[key], profile, rng, align="left")
         elif key in DIGIT_COMB_FIELDS:
-            # datum/rok/psc/supisne: digits RIGHT-aligned — last digit in the
-            # rightmost cell, filling leftward (form convention; leaves any
-            # spare cells blank on the LEFT).
-            for ch, cell in zip(reversed(str(val)), reversed(DIGIT_COMB_CELLS[key])):
-                _draw_char_in_cell(draw, ch, cell, font, rng)
+            # datum/rok/psc/supisne/DIČ: digits RIGHT-aligned (form convention).
+            rh.draw_chars_in_cells(img, str(val), DIGIT_COMB_CELLS[key], profile, rng, align="right")
         elif key in FUZZY_TEXT_FIELDS:
-            # titul/ulica/obec/stat: one letter per comb cell (may overflow = truncated).
-            for ch, cell in zip(str(val), TEXT_COMB_CELLS[key]):
-                if ch == " ":
-                    continue
-                _draw_char_in_cell(draw, ch, cell, font, rng)
+            rh.draw_chars_in_cells(img, str(val), TEXT_COMB_CELLS[key], profile, rng, align="left")
         elif key == "meno_zamestnanca":
-            # surname → Priezvisko comb, first name → Meno comb, one letter per cell.
             parts = str(val).split(" ", 1)
-            surname = parts[0]
-            given = parts[1] if len(parts) > 1 else ""
-            for ch, cell in zip(surname, PRIEZVISKO_CELLS):
-                _draw_char_in_cell(draw, ch, cell, font, rng)
-            for ch, cell in zip(given, MENO_CELLS):
-                _draw_char_in_cell(draw, ch, cell, font, rng)
+            rh.draw_chars_in_cells(img, parts[0], PRIEZVISKO_CELLS, profile, rng, align="left")
+            if len(parts) > 1:
+                rh.draw_chars_in_cells(img, parts[1], MENO_CELLS, profile, rng, align="left")
         else:
-            text = str(val)
-            _, _, _, th = draw.textbbox((0, 0), "M", font=font)
-            base_y = y1 + (y2 - y1 - th) // 2
-            base_x = x1 + 8
-            cx = base_x
-            for ch in text:
-                jx = rng.randint(-2, 2)
-                jy = rng.randint(-2, 2)
-                draw.text((cx + jx, base_y + jy), ch, fill=0, font=font)
-                cx += draw.textlength(ch, font=font)
+            rh.draw_text(img, str(val), x1, y1, x2, y2, profile, rng)
 
 
-def add_scan_noise(img: Image.Image, rng: random.Random) -> Image.Image:
-    angle = rng.uniform(-1.0, 1.0)   # >±1° shifts row borders 6+px into adjacent cells
-    img = img.rotate(angle, resample=Image.BICUBIC, expand=False, fillcolor=255)
-    img = img.filter(ImageFilter.GaussianBlur(radius=rng.uniform(0.3, 0.8)))
-    arr = np.array(img)
-    mask_pepper = rng.random((arr.shape[0], arr.shape[1])) < 0.01
-    mask_salt   = rng.random((arr.shape[0], arr.shape[1])) < 0.01
-    arr[mask_pepper] = 0
-    arr[mask_salt]   = 255
-    return Image.fromarray(arr)
-
-
-def generate_sample(idx: int, break_type: str | None,
-                    rng: random.Random, font_fill: ImageFont.ImageFont,
-                    full: bool = False
+def generate_sample(idx: int, spec: dict, rng: random.Random,
+                    pal_pool: list, pr_pool: list
                     ) -> tuple[Image.Image, Image.Image, dict]:
-    gt, broken_fields = make_ground_truth(rng, break_type, full)
+    gt, broken_fields, gaz_miss = make_ground_truth(rng, spec)
+
+    pool = pr_pool if spec["style"] == "printed" else pal_pool
+    profile = pool[idx % len(pool)]
 
     p1 = Image.open(TEMPLATE_P1).convert("L")
-    draw1 = ImageDraw.Draw(p1)
-    draw_values(p1, draw1, gt, FIELD_BOXES_P1, font_fill, rng)
-    p1 = add_scan_noise(p1, rng)
+    draw_values(p1, gt, FIELD_BOXES_P1, profile, rng)
+    p1 = rh.add_paper_texture(p1, profile, rng)
 
     p2 = Image.open(TEMPLATE_P2).convert("L")
-    draw2 = ImageDraw.Draw(p2)
-    draw_values(p2, draw2, gt, FIELD_BOXES_P2, font_fill, rng)
-    p2 = add_scan_noise(p2, rng)
+    draw_values(p2, gt, FIELD_BOXES_P2, profile, rng)
+    p2 = rh.add_paper_texture(p2, profile, rng)
 
     data = {
         "sample_id": f"sample_{idx:04d}",
-        "_is_broken": break_type is not None,
+        "_is_broken": bool(broken_fields),
         "_broken_fields": broken_fields,
+        "_gazetteer_miss": gaz_miss,
+        "_style": spec["style"],
+        "_writer": profile.name,
         "_field_boxes_p1": FIELD_BOXES_P1,
         "_field_boxes_p2": FIELD_BOXES_P2,
         "ground_truth": gt,
@@ -394,63 +442,90 @@ def generate_sample(idx: int, break_type: str | None,
     return p1, p2, data
 
 
+# ---------------------------------------------------------------------------
+# The 20-sample coverage matrix (13 valid + 7 broken; ~15 paličkové / 5 printed)
+# ---------------------------------------------------------------------------
+def _spec(children, sex, months, oprava, obmedz, employer, income, names, style,
+          brk=None, gaz=(), full=False, empty_optionals=False) -> dict:
+    return dict(children=children, sex=sex, months=months, oprava=oprava,
+                obmedz=obmedz, employer=employer, income=income, names=names,
+                style=style, brk=brk, gaz=list(gaz), full=full,
+                empty_optionals=empty_optionals)
+
+
+SAMPLE_SPECS = [
+    _spec(0, "M", "master",  False, False, "company", "typical", "plain", "palickove"),
+    _spec(1, "F", "partial", True,  False, "company", "zero",    "light", "palickove"),
+    _spec(2, "M", "none",    False, True,  "person",  "typical", "plain", "printed"),
+    _spec(3, "F", "partial", False, False, "company", "large",   "heavy", "palickove"),
+    _spec(0, "M", "master",  True,  True,  "person",  "typical", "plain", "palickove", brk="arithmetic"),
+    _spec(4, "F", "all",     False, False, "company", "large",   "heavy", "palickove"),
+    _spec(1, "M", "partial", False, True,  "company", "zero",    "plain", "printed"),
+    _spec(2, "F", "partial", True,  False, "person",  "typical", "light", "palickove", brk="mod11"),
+    _spec(0, "M", "none",    False, False, "company", "typical", "plain", "palickove", empty_optionals=True),
+    _spec(3, "F", "partial", False, True,  "company", "typical", "heavy", "palickove"),
+    _spec(1, "M", "master",  True,  False, "person",  "typical", "plain", "palickove", brk="datum"),
+    _spec(2, "M", "partial", False, False, "company", "typical", "light", "printed",   gaz=("obec",)),
+    _spec(0, "F", "none",    False, True,  "company", "small",   "plain", "printed"),
+    _spec(4, "M", "all",     True,  False, "company", "typical", "heavy", "palickove", brk="p2_rc"),
+    _spec(2, "F", "partial", False, False, "person",  "typical", "light", "palickove", gaz=("stat", "titul")),
+    _spec(1, "M", "master",  False, True,  "company", "typical", "plain", "palickove", brk="psc_len"),
+    _spec(3, "F", "partial", True,  False, "company", "large",   "heavy", "palickove"),
+    _spec(0, "M", "none",    False, False, "company", "typical", "plain", "printed",   brk="dic_len"),
+    _spec(2, "M", "partial", False, True,  "person",  "typical", "light", "palickove"),
+    _spec(4, "F", "all",     True,  True,  "company", "mix",     "heavy", "palickove", brk="rok_range", full=True),
+]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate synthetic POT395 form samples.")
-    parser.add_argument("--n", type=int, default=8)
+    parser.add_argument("--n", type=int, default=0, help="limit to first N specs (0 = all 20)")
     parser.add_argument("--out", type=str, default="samples/")
-    parser.add_argument("--break-frac", type=float, default=0.25)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--break-frac", type=float, default=0.0, help="(ignored; specs are explicit)")
     parser.add_argument("--full", action="store_true",
-                        help="emit ONE fully-filled sample (every field populated) for testing")
+                        help="legacy: emit ONE fully-filled sample (sample_full)")
     args = parser.parse_args()
 
-    for tmpl in [TEMPLATE_P1, TEMPLATE_P2]:
+    for tmpl in (TEMPLATE_P1, TEMPLATE_P2):
         if not tmpl.exists():
-            raise FileNotFoundError(
-                f"Template not found: {tmpl}\n"
-                "Run: pdftoppm -r 150 -png newestpotvrdenietemplate.pdf /tmp/pot395_page\n"
-                "     cp /tmp/pot395_page-1.png form_template_p1.png\n"
-                "     cp /tmp/pot395_page-2.png form_template_p2.png"
-            )
+            raise FileNotFoundError(f"Template not found: {tmpl}")
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     rng = random.Random(args.seed)
-    np_rng = np.random.default_rng(args.seed)
-
-    class _HybridRng(random.Random):
-        def random(self, shape=None):
-            if shape is not None:
-                return np_rng.random(shape)
-            return super().random()
-    rng.__class__ = _HybridRng
-
-    font_fill = find_font(20)
+    pal_pool, pr_pool, note = rh.build_profiles()
+    print(f"Render: {note}")
 
     if args.full:
-        p1, p2, data = generate_sample(1, None, rng, font_fill, full=True)
+        spec = SAMPLE_SPECS[-1]                              # the fully-populated spec
+        p1, p2, data = generate_sample(1, spec, rng, pal_pool, pr_pool)
         stem = "sample_full"
         p1.save(out_dir / f"{stem}_p1.png")
         p2.save(out_dir / f"{stem}_p2.png")
         (out_dir / f"{stem}.json").write_text(json.dumps(data, indent=2, ensure_ascii=False))
-        print(f"Fully-filled sample → {out_dir}/{stem}_p1.png + _p2.png + .json")
+        print(f"Fully-filled sample → {out_dir}/{stem}_*.png + .json")
         return
 
-    n_broken = math.ceil(args.n * args.break_frac)
-    break_types = ["arithmetic", "rod_cislo", "datum", "both"]
-    configs = [break_types[i % len(break_types)] for i in range(n_broken)] + [None] * (args.n - n_broken)
-    rng.shuffle(configs)
+    specs = SAMPLE_SPECS[:args.n] if args.n else SAMPLE_SPECS
+    n_broken = sum(1 for s in specs if s["brk"])
+    n_printed = sum(1 for s in specs if s["style"] == "printed")
+    print(f"Generating {len(specs)} samples ({n_broken} broken, {n_printed} printed) → {out_dir}/")
 
-    print(f"Generating {args.n} samples ({n_broken} broken) → {out_dir}/")
-    for idx, break_type in enumerate(configs, 1):
-        p1, p2, data = generate_sample(idx, break_type, rng, font_fill)
+    for idx, spec in enumerate(specs, 1):
+        p1, p2, data = generate_sample(idx, spec, rng, pal_pool, pr_pool)
         stem = f"sample_{idx:04d}"
         p1.save(out_dir / f"{stem}_p1.png")
         p2.save(out_dir / f"{stem}_p2.png")
         (out_dir / f"{stem}.json").write_text(json.dumps(data, indent=2, ensure_ascii=False))
-        status = f"[BROKEN: {','.join(data['_broken_fields'])}]" if data["_is_broken"] else "[valid]"
-        print(f"  {stem}  {status}")
+        tags = []
+        if data["_broken_fields"]:
+            tags.append(f"BROKEN:{','.join(data['_broken_fields'])}")
+        if data["_gazetteer_miss"]:
+            tags.append(f"GAZ-MISS:{','.join(data['_gazetteer_miss'])}")
+        status = f"[{' '.join(tags)}]" if tags else "[valid]"
+        print(f"  {stem}  {spec['style']:9} {status}")
 
     print("Done.")
 
