@@ -4,7 +4,8 @@
 This is the single source of truth: goal, constraints, honest status, roadmap,
 hard-won gotchas, and the dead-ends not to repeat. For diagrams of how the app
 works, see **`ARCHITECTURE.md`**; for cloud deployment & scaling (sizing for ~100
-concurrent users on a GPU host), see **`DEPLOYMENT.md`**.
+concurrent users on a GPU host), see **`DEPLOYMENT.md`**, and for the phased rollout
+plan + the GPU-vs-CPU-only decision, see **`DEPLOYMENT_PLAN.md`**.
 
 ---
 
