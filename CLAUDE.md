@@ -3,7 +3,8 @@
 **Project memory for Claude Code. Read this before doing anything in the repo.**
 This is the single source of truth: goal, constraints, honest status, roadmap,
 hard-won gotchas, and the dead-ends not to repeat. For diagrams of how the app
-works, see **`ARCHITECTURE.md`**.
+works, see **`ARCHITECTURE.md`**; for cloud deployment & scaling (sizing for ~100
+concurrent users on a GPU host), see **`DEPLOYMENT.md`**.
 
 ---
 
