@@ -3,8 +3,8 @@
 test_phase6.py — smoke-test the Phase-6 LLM text second-check against a LIVE server.
 
 Run `bash serve_llm.sh` in one terminal, then `python test_phase6.py` in another.
-Proves the real round-trip: health probe → grammar-constrained /completion → tiered
-behaviour (name = suggestion-only, semi-open = cleaned+adopted-iff-revalidated).
+Proves the real round-trip: health probe → grammar-constrained /v1/chat/completions
+→ tiered behaviour (name = suggestion-only, semi-open = cleaned+adopted-iff-revalidated).
 If no server is up, it reports the graceful-degradation path instead of failing.
 """
 import text_second_check as t

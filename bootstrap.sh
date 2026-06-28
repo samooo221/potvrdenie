@@ -55,7 +55,20 @@ pkg_install git cmake curl python3 python3-pip
 # --- 2. python project + CUDA vision stack ---------------------------------
 say "Creating Python venv and installing the CUDA vision stack"
 mkdir -p "$PROJ"
-python3 -m venv "$VENV"
+# paddlepaddle has no wheel for Python 3.14 yet, so pin the venv to 3.12. On the
+# Ubuntu rack `python3` is already 3.12, but on the Fedora laptop `python3` is
+# 3.14 — a bare `python3 -m venv` there builds a venv pip can't fill. Prefer an
+# explicit 3.12, then 3.11, and only fall back to `python3` with a warning.
+PYBIN=""
+for cand in python3.12 python3.11; do
+  command -v "$cand" >/dev/null 2>&1 && { PYBIN="$cand"; break; }
+done
+if [ -z "$PYBIN" ]; then
+  PYBIN=python3
+  warn "python3.12 not found — using $(python3 -V 2>&1). If paddlepaddle won't install, install python3.12 (paddlepaddle has no 3.14 wheel) and re-run."
+fi
+say "Using ${PYBIN} for the venv"
+"$PYBIN" -m venv "$VENV"
 # shellcheck disable=SC1091
 source "${VENV}/bin/activate"
 pip install --upgrade pip

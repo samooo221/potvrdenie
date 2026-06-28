@@ -4,7 +4,8 @@
 #
 # Phase 6 only needs a TINY model doing short Slovak text cleanup (name/ulica/
 # obchodné meno), so CPU is fine for the dev box. text_second_check.py POSTs to
-# http://localhost:8080/completion with a GBNF grammar; this serves that endpoint.
+# http://localhost:8080/v1/chat/completions with a GBNF grammar (the chat endpoint
+# applies the model's own chat template); this serves that endpoint.
 #
 # Env overrides:
 #   LLM_MODEL      path to the .gguf            (default ~/models/*Qwen2.5-1.5B*.gguf)

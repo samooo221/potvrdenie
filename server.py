@@ -409,13 +409,6 @@ function renderResults(data) {
   vbox.innerHTML = html;
 }
 
-function toggleMonth(i) {
-  const el = document.getElementById("mc_" + i);
-  const on = !el.classList.contains("checked");
-  el.className = "m-val " + (on ? "checked" : "unchecked");
-  el.textContent = on ? "×" : "";
-}
-
 function toggleCheck(k) {
   const el = document.getElementById("f_" + k);
   const on = !el.classList.contains("checked");
@@ -433,10 +426,8 @@ function collectFields() {
   for (const k of INCOME_FIELDS) {
     out[k] = document.getElementById("f_" + k)?.value || "";
   }
-  for (let i=1; i<=12; i++) {
-    const key = "mesiac_" + String(i).padStart(2,"0");
-    out[key] = document.getElementById("mc_"+i).classList.contains("checked");
-  }
+  // Month grids (r10/r13/dieta*) are recognized + displayed read-only in this
+  // review UI, so there are no editable month inputs to collect here.
   return out;
 }
 
