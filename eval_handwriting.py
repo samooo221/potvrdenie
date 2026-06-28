@@ -2,7 +2,7 @@
 """
 eval_handwriting.py — REAL per-field accuracy + confidence on pen-filled forms.
 
-The headline 99% in STATUS.md is against a printed font the code drew itself, on
+The synthetic headline (see CLAUDE.md §5) is against fonts the code drew itself, on
 shared coordinates. It proves the plumbing, not handwriting. This harness is the
 instrument that produces an HONEST number on real paper: it aligns each photo the
 same way the server does, runs the live OCR pipeline, and compares to typed labels
