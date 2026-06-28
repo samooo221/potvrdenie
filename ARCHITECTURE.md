@@ -27,11 +27,11 @@ flowchart TD
     C -- "yes" --> E["per-field crop<br/>field_defs.FIELD_BOXES_P1 / P2"]
     D --> E
     E --> F["recognize each field<br/>crop_ocr.ocr_page"]
-    F --> G["build_extracted<br/>normalize per field type → {field: value}"]
+    F --> G["build_extracted<br/>normalize per field type → field/value dict"]
     G --> H["disambiguate_extracted<br/>constraint-guided repair of LOW-conf digit cells"]
     H --> I["validate_extracted<br/>re-run form arithmetic + format rules on the EXTRACTION"]
-    I --> J["escalate<br/>flag if confidence < threshold OR in a failed constraint"]
-    J --> K["Review UI — server.py<br/>scan │ fields + confidence + ⚑ flags + suggestions"]
+    I --> J["escalate<br/>flag if confidence below threshold OR in a failed constraint"]
+    J --> K["Review UI — server.py<br/>scan · fields + confidence + ⚑ flags + suggestions"]
     K --> L["Human accepts / corrects<br/>(the model never auto-commits)"]
 
     classDef built fill:#cdebc5,stroke:#2e7d32,color:#000;
@@ -52,7 +52,7 @@ whole-page OCR.
 ```mermaid
 flowchart TD
     F["field + its box"] --> T{"type set<br/>(field_defs.py)"}
-    T -- "MONTH / CHECKBOX" --> O["cell_is_occupied<br/>dark-pixel fraction > 0.10"]
+    T -- "MONTH / CHECKBOX" --> O["cell_is_occupied<br/>dark-pixel fraction over 0.10"]
     T -- "income digits" --> N["_ocr_income_field<br/>per-cell PP-OCRv6, ink-gated"]
     T -- "short page-2 income" --> W["_ocr_income_wholebox<br/>padded whole-box + structural decimal"]
     T -- "rodné číslo" --> R["_ocr_rc_field<br/>per-cell digits, slash inserted in code"]
@@ -87,13 +87,13 @@ This is the heart of the product — the human-in-the-loop story for a tax autho
 
 ```mermaid
 flowchart TD
-    OCR["per-field result<br/>{value, confidence = min over cells, low_conf_cells}"] --> EX["build_extracted<br/>→ normalized {field: value}"]
+    OCR["per-field result<br/>value · confidence (min over cells) · low_conf_cells"] --> EX["build_extracted<br/>→ normalized field/value dict"]
     EX --> DIS{"field has LOW-conf cells<br/>AND fails a constraint?"}
     DIS -- "yes" --> SEARCH["search digit substitutions over<br/>ONLY the low-conf cells"]
     SEARCH --> ADOPT["adopt the assignment that<br/>satisfies the constraint (e.g. mod-11)"]
     DIS -- "no" --> VAL
     ADOPT --> VAL["validate_extracted<br/>re-run ALL form rules on the result"]
-    VAL --> ESC{"confidence < class threshold<br/>OR field is in a failed constraint?"}
+    VAL --> ESC{"confidence below class threshold<br/>OR field is in a failed constraint?"}
     ESC -- "yes" --> FLAG["⚑ FLAG for human review<br/>(with the reason)"]
     ESC -- "no" --> ACC["auto-accept"]
 
