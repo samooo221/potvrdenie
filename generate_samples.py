@@ -296,7 +296,10 @@ def make_ground_truth(rng: random.Random, spec: dict) -> tuple[dict, list[str], 
 
     # --- dátum narodenia (cross-check with rod_cislo) ---
     if brk == "datum":
-        datum = datum_from_rc(make_valid_rc(rng, sex))       # unrelated DOB
+        bad = make_valid_rc(rng, sex)                        # unrelated DOB
+        while datum_from_rc(bad) == datum_from_rc(rc):       # guarantee it really differs from rc's
+            bad = make_valid_rc(rng, sex)
+        datum = datum_from_rc(bad)
         broken_fields.append("datum_narodenia")
     else:
         datum = datum_from_rc(rc if re.fullmatch(r"\d{6}/\d{4}", rc) else make_valid_rc(rng, sex))
