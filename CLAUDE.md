@@ -110,8 +110,10 @@ multi-width name recon), `field_defs.py` (geometry + type sets incl. `GAZETTEER_
 `server.py` (FastAPI review UI: confidence badges + flag reasons + name suggestions),
 `eval_handwriting.py` (real per-field accuracy + mean confidence harness),
 `generate_samples.py` / `make_handwritten.py` (synthetic data), `align_photo.py`.
-Current: 98.5% on the synthetic printed-font set (1144/1162), ~5.8 fields/form
-flagged, confidence reliably catches the genuine misreads.
+Current headline (STATUS.md §4): **94.3% (2453/2600)** on the 20 simulated hand-print
+(paličkové) samples — the earlier printed-font runs (98.5%/99.1%) are superseded;
+hand-print is harder. Per-field confidence reliably catches the genuine misreads and
+flags them for human review.
 
 **Phase 6 (text second-check LLM tier) — code-complete, dormant until a model runs.**
 `text_second_check.py` talks to a LOCAL llama-server (`LLAMA_URL`, default :8080),
@@ -119,7 +121,7 @@ grammar-constrained to Slovak block letters. Fires ONLY on escalated text fields
 gazetteer (closed sets) → LLM CLEAN+adopt for semi-open (ulica/obchodné meno, re-validated)
 → LLM SUGGESTION-only for names (never auto-accepted, shown beside the scan). Numbers
 never enter. Degrades to gazetteer-plus-flag if the server is down (verified: identical
-98.5% with no server). To activate: build llama.cpp + run a tiny model on :8080.
+94.3% with no server). To activate: build llama.cpp + run a tiny model on :8080.
 
 **Deliberately NOT built / deferred:** `extract_potvrdenie.py` / LLM *structuring* / GBNF
 as a required stage (dropped on purpose). **Deferred:** Phase-5 ICR and the two-GPU Vulkan

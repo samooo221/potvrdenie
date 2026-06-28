@@ -3,7 +3,8 @@
 This is the honest state of the code, not the plan. Read it before trusting any number.
 
 **One-line truth:** A deterministic OCR + rules pipeline for both pages of the POT395 form,
-reaching ~98.5% on **synthetic samples it generates itself in a printed font**. The robustness
+reaching **94.3% (2453/2600)** on **20 synthetic samples it renders itself in simulated hand-print
+(paličkové) fonts** — the earlier printed-font runs (~98.5–99.1%) are superseded. The robustness
 core (confidence, validation, escalation, gazetteer, scoped LLM second-check) is built; the
 system has **never been tested on real handwriting** — that is the one thing that matters next.
 
@@ -23,9 +24,9 @@ system has **never been tested on real handwriting** — that is the one thing t
 | Two-GPU Vulkan rack / GPU OCR | ❌ NOT STARTED | deployment optimization; the dev box is one laptop, OCR runs on CPU |
 | DP-reconciliation demo feature | ❌ NOT STARTED | deferred differentiator |
 
-**The single most important gap: Phase 4.** Every accuracy number in this doc is against a printed
-font the code drew itself. Until real pen-filled forms are photographed and graded, "98.5%" means
-"the plumbing works," NOT "it reads real handwriting."
+**The single most important gap: Phase 4.** Every accuracy number in this doc is against fonts the
+code drew itself (now simulated hand-print, earlier printed) — never real pen. Until real pen-filled
+forms are photographed and graded, "94.3%" means "the plumbing works," NOT "it reads real handwriting."
 
 ---
 
